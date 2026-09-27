@@ -1,0 +1,13 @@
+# Raw and generated datasets are large; provenance is tracked in the docs vault (Datasets.md)
+data/*
+!data/README.md
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+# Outputs
+reports/
+.DS_Store
