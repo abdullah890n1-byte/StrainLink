@@ -312,6 +312,14 @@ class Api:
         self._frame_cache[key] = result
         return result
 
+    def accuracy(self, project_path: str) -> dict:
+        """Known-answer comparison for synthetic tests (those with a truth.json)."""
+        from ..validation.known_answers import compare
+        try:
+            return {"ok": True, **compare(Path(project_path).parent)}
+        except FileNotFoundError:
+            return {"ok": False}
+
     def open_report(self, project_path: str) -> dict:
         path = Path(project_path).parent / "results" / "report.html"
         if not path.exists():

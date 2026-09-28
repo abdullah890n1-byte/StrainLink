@@ -155,7 +155,7 @@
     <div id="res-synthetic" class="synthetic hidden">SYNTHETIC DATA — a generated test with known answers, not a real experiment.</div>
     <div class="cards" id="res-cards"></div>
     <div class="tabs" id="res-tabs">
-      <button data-tab="overview" class="on">Overview</button><button data-tab="soil">Slip surface</button><button data-tab="findings">Findings</button><button data-tab="review">Review <span id="review-count" class="count"></span></button>
+      <button data-tab="overview" class="on">Overview</button><button data-tab="soil">Slip surface</button><button data-tab="findings">Findings</button><button data-tab="review">Review <span id="review-count" class="count"></span></button><button data-tab="accuracy" id="tab-accuracy" class="hidden">Accuracy ✓</button>
     </div>
     <div class="tab" data-tab="overview">
       <div class="two"><div id="plot-force" class="plot"></div><div id="plot-cells" class="plot"></div></div>
@@ -175,6 +175,11 @@
     </div>
     <div class="tab hidden" data-tab="findings"><p class="muted small">Graded by the strength of the evidence. Every statement is computed from your data; open a finding to see the numbers and the method.</p><div id="findings-list"></div></div>
     <div class="tab hidden" data-tab="review"><div id="review-flags"></div></div>
+    <div class="tab hidden" data-tab="accuracy">
+      <div id="acc-banner" class="acc-banner"></div>
+      <p class="muted small">This test is synthetic, so the true answers are known exactly. Every automatic result is compared with its true value and judged against the tolerance shown (the same tolerances as in StrainLink's validation records).</p>
+      <div id="acc-table"></div>
+    </div>
   </section>
 </main>
 <div id="toast" class="toast hidden"></div>

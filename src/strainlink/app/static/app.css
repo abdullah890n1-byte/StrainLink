@@ -151,3 +151,12 @@ label.block { display: block; margin: 18px 0; font-weight: 600; font-size: 13px;
 button.link { border: none; background: none; color: var(--accent); padding: 0 2px; font-size: inherit; }
 .review .item .caution { color: var(--warn); font-weight: 600; }
 .thumbs { margin-top: 4px; }
+
+/* accuracy tab (synthetic tests with known answers) */
+.acc-banner { padding: 12px 16px; border-radius: 12px; margin-bottom: 10px; font-size: 15px; }
+.acc-banner.good { background: #e6f6ea; color: #1e6b31; } .acc-banner.warn { background: var(--warn-soft); color: var(--warn); }
+@media (prefers-color-scheme: dark) { .acc-banner.good { background: #173322; color: #7fd89a; } }
+table.acc { width: 100%; border-collapse: collapse; font-size: 13px; margin-bottom: 8px; }
+table.acc th { text-align: left; color: var(--muted); font-weight: 600; font-size: 12px; padding: 6px 8px; border-bottom: 1px solid var(--line); }
+table.acc td { padding: 6px 8px; border-bottom: 1px solid var(--line); font-variant-numeric: tabular-nums; vertical-align: top; }
+table.acc td.mark { width: 26px; font-weight: 800; color: var(--good); } table.acc tr.bad td.mark { color: var(--bad); } table.acc tr.bad { background: var(--warn-soft); }

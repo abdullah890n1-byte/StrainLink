@@ -31,6 +31,8 @@ def main(argv: list[str] | None = None) -> int:
     demo.add_argument("--preset", choices=["loose", "medium", "dense"], default="medium")
     rep = sub.add_parser("report", help="rebuild the HTML report of an analysed project")
     rep.add_argument("project")
+    chk = sub.add_parser("check", help="compare an analysed synthetic test with its known answers")
+    chk.add_argument("project")
     args = parser.parse_args(argv)
 
     if args.command == "app":
@@ -55,6 +57,17 @@ def main(argv: list[str] | None = None) -> int:
         path = make_demo(args.folder, DemoSpec(preset=args.preset), progress=lambda f, m: _progress("Demo", f, m))
         print(f"Demo project: {path}  (SYNTHETIC DATA)")
         return 0
+    if args.command == "check":
+        from .validation.known_answers import compare
+        try:
+            result = compare(Path(args.project).parent)
+        except FileNotFoundError:
+            print("This project has no known answers (truth.json): only synthetic tests can be checked this way.")
+            return 2
+        for c in result["checks"]:
+            print(f"{'OK ' if c['ok'] else 'XX '} {c['item']:<58} found {c['found']:<28} true {c['true']:<24} {c['error']}")
+        print(f"\n{result['passed']} of {result['total']} checks within tolerance.")
+        return 0 if result["passed"] == result["total"] else 1
     if args.command == "report":
         from . import report
         print(report.build(Path(args.project).parent / "results"))
