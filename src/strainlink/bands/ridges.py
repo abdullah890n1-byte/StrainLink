@@ -35,24 +35,48 @@ def fill_missing(field: np.ndarray) -> np.ndarray:
 
 def ridge_strength(
     gamma: np.ndarray, spacing_mm: float, min_width_mm: float, max_width_mm: float
-) -> tuple[np.ndarray, np.ndarray]:
-    """Scale-normalised ridge strength and the best scale (sigma, grid units) per point."""
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Scale-normalised ridge strength, best scale (sigma, grid units) and the unit
+    normal across the ridge (row, col components, shape (2, H, W)) per point."""
     filled = fill_missing(gamma)
     sigma_lo = max(min_width_mm / FWHM_PER_SIGMA / spacing_mm, MIN_SIGMA_GRID)
     sigma_hi = max(max_width_mm / FWHM_PER_SIGMA / spacing_mm, sigma_lo)
     sigmas = np.geomspace(sigma_lo, sigma_hi, N_SCALES)
     best = np.zeros_like(filled)
     best_sigma = np.full_like(filled, sigmas[0])
+    normal = np.zeros((2,) + filled.shape)
     for sigma in sigmas:
-        elements = hessian_matrix(filled, sigma=sigma, mode="nearest", order="rc",
-                                  use_gaussian_derivatives=True)
+        hrr, hrc, hcc = hessian_matrix(filled, sigma=sigma, mode="nearest", order="rc",
+                                       use_gaussian_derivatives=True)
         # Eigenvalues sorted in decreasing order; the last is the most negative.
-        smallest = hessian_matrix_eigvals(elements)[-1]
+        smallest = hessian_matrix_eigvals([hrr, hrc, hcc])[-1]
         response = sigma**2 * np.clip(-smallest, 0.0, None)
         better = response > best
         best[better] = response[better]
         best_sigma[better] = sigma
-    return best, best_sigma
+        # Eigenvector of the most negative eigenvalue = direction across the ridge.
+        nr, nc = hrc, smallest - hrr
+        degenerate = np.hypot(nr, nc) < 1e-12
+        nr = np.where(degenerate, smallest - hcc, nr)
+        nc = np.where(degenerate, hrc, nc)
+        norm = np.hypot(nr, nc)
+        norm = np.where(norm > 0, norm, 1.0)
+        normal[0][better] = (nr / norm)[better]
+        normal[1][better] = (nc / norm)[better]
+    return best, best_sigma, normal
+
+
+def ridge_maxima(strength: np.ndarray, normal: np.ndarray) -> np.ndarray:
+    """Non-maximum suppression across the ridge (Canny/Steger style).
+
+    Keeps points whose strength is not lower than at +-1 grid step along the
+    ridge normal. The result is a thin centreline, even where two bands cross,
+    instead of a thick blob that would have to be skeletonised.
+    """
+    rows, cols = np.indices(strength.shape, dtype=float)
+    ahead = ndimage.map_coordinates(strength, [rows + normal[0], cols + normal[1]], order=1, mode="nearest")
+    behind = ndimage.map_coordinates(strength, [rows - normal[0], cols - normal[1]], order=1, mode="nearest")
+    return (strength >= ahead) & (strength >= behind) & (strength > 0)
 
 
 def robust_noise(values: np.ndarray) -> tuple[float, float]:

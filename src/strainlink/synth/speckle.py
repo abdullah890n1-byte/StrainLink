@@ -22,6 +22,8 @@ DisplacementFn = Callable[[np.ndarray, np.ndarray], tuple[np.ndarray, np.ndarray
 
 SUPERSAMPLE = 4
 FIXED_POINT_ITERATIONS = 25
+# The pull-back iteration stops once no sample moves more than this (px).
+FIXED_POINT_TOLERANCE_PX = 1e-3
 # 8-bit camera range: grey levels 0..255.
 GREY_LEVELS = 255.0
 
@@ -105,5 +107,9 @@ def _pull_back(x: np.ndarray, y: np.ndarray, displacement: DisplacementFn) -> tu
     ref_x, ref_y = x.copy(), y.copy()
     for _ in range(FIXED_POINT_ITERATIONS):
         u, v = displacement(ref_x, ref_y)
-        ref_x, ref_y = x - u, y - v
+        new_x, new_y = x - u, y - v
+        change = max(np.max(np.abs(new_x - ref_x)), np.max(np.abs(new_y - ref_y)))
+        ref_x, ref_y = new_x, new_y
+        if change < FIXED_POINT_TOLERANCE_PX:
+            break
     return ref_x, ref_y

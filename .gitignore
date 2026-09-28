@@ -11,3 +11,9 @@ venv/
 # Outputs
 reports/
 .DS_Store
+
+# Copied from the plotly package at app start (4.7 MB)
+src/strainlink/app/static/plotly.min.js
+
+# Local development build of the Mac app (make with scripts/make_mac_app.py)
+StrainLink.app/

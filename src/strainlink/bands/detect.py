@@ -23,7 +23,7 @@ from skimage.filters import apply_hysteresis_threshold
 
 from . import centreline as cl
 from .paths import extract_paths
-from .ridges import fill_missing, ridge_strength, robust_noise
+from .ridges import FWHM_PER_SIGMA, fill_missing, ridge_maxima, ridge_strength, robust_noise
 from .shape import ShapeResult, classify, lift_off_from_model
 
 # Relative tolerance when checking that the grid spacing is the same in x and z.
@@ -33,12 +33,22 @@ NOISE_MEDIAN_SIZE = 5
 # Points at the ends of a band whose peak falls below this fraction of the band's
 # median peak are not part of the localised band.
 TIP_PEAK_FRACTION = 0.35
+# Holes of at most this many grid points in the strain field are bridged.
+SMALL_HOLE_POINTS = 6
 # Percentile used to characterise a band's core (sharpest quarter of its points).
 CORE_PERCENTILE = 25
+# Interruptions of a band's localised run up to this many core widths are
+# bridged (another band crossing it).
+CROSSING_GAP_WIDTHS = 2.5
 # Share of NaN strain around a band above which it is flagged as near a data gap.
 DATA_GAP_FRACTION = 0.1
-# Lift-off uncertainty above which the angle is flagged (degrees).
-LIFT_OFF_SIGMA_LIMIT_DEG = 5.0
+# Lift-off uncertainty (1 sigma, degrees) above which the angle is flagged: at
+# 1.5 deg the 95% range reaches the +-3 deg accuracy tolerance.
+LIFT_OFF_SIGMA_LIMIT_DEG = 1.5
+# Shape is judged away from the band's ends: within about one band width of
+# the wall the wall-friction zone bends the band, and at the surface the free
+# boundary does. (Lift-off is still extrapolated to the toe from the model.)
+SHAPE_END_EXCLUSION_WIDTHS = 1.0
 # Signal-to-noise ratio below which a band is flagged as low contrast.
 MIN_SNR = 5.0
 # A band whose median width is this close to the maximum accepted width is flagged.
@@ -157,13 +167,16 @@ def _to_mm(x: np.ndarray, z: np.ndarray, rows: np.ndarray, cols: np.ndarray) -> 
     ])
 
 
-def _localised_run(line: cl.Centreline, max_width_grid: float, tip_width_factor: float) -> slice | None:
-    """The longest contiguous run of localised points along a path.
+def _localised_run(line: cl.Centreline, max_width_grid: float, tip_width_factor: float) -> np.ndarray | None:
+    """Indices of the band's localised points along a path.
 
     A path can run from a sharp band into the diffuse zone ahead of its tip.
-    The band's core is characterised from its narrow points only (width
-    within the accepted maximum); points much wider or weaker than that core
-    are not part of the band.
+    The band's core is characterised from its sharpest points; points much
+    wider or weaker than that core are not part of the band. Short
+    interruptions (up to CROSSING_GAP_WIDTHS core widths) are bridged: where
+    another band crosses, the profile across this band includes the other
+    one, so a few points look "not localised" although the band continues.
+    Only the interrupted points themselves are dropped.
     """
     narrow = np.isfinite(line.fwhm_grid) & (line.fwhm_grid <= max_width_grid)
     if not narrow.any():
@@ -173,15 +186,30 @@ def _localised_run(line: cl.Centreline, max_width_grid: float, tip_width_factor:
     core_width = np.percentile(line.fwhm_grid[narrow], CORE_PERCENTILE)
     core_peak = np.percentile(line.peak[narrow], 100 - CORE_PERCENTILE)
     good = narrow & (line.fwhm_grid <= tip_width_factor * core_width) & (line.peak >= TIP_PEAK_FRACTION * core_peak)
-    best, start = None, None
-    for i, ok in enumerate(np.append(good, False)):
+    runs = _runs(good)
+    if not runs:
+        return None
+    max_gap = CROSSING_GAP_WIDTHS * core_width   # path points are about one grid step apart
+    merged = [list(runs[0])]
+    for start, stop in runs[1:]:
+        if start - merged[-1][1] <= max_gap:
+            merged[-1][1] = stop
+        else:
+            merged.append([start, stop])
+    best = max(merged, key=lambda r: good[r[0]:r[1]].sum())
+    return best[0] + np.flatnonzero(good[best[0]:best[1]])
+
+
+def _runs(flags: np.ndarray) -> list[tuple[int, int]]:
+    """(start, stop) index pairs of consecutive True values."""
+    runs, start = [], None
+    for i, ok in enumerate(np.append(flags, False)):
         if ok and start is None:
             start = i
         elif not ok and start is not None:
-            if best is None or i - start > best.stop - best.start:
-                best = slice(start, i)
+            runs.append((start, i))
             start = None
-    return best
+    return runs
 
 
 def detect_bands(
@@ -199,16 +227,23 @@ def detect_bands(
     """
     settings = settings or DetectionSettings()
     spacing = _grid_spacing(x, z)
-    valid = np.isfinite(gamma)
+    # Isolated lost DIC points (typically right on a band's centreline, where
+    # shear is highest) would punch holes in the ridge and break it into
+    # loops. Small holes are bridged with interpolated strain; only large
+    # gaps count as missing data.
+    valid = _bridge_small_holes(np.isfinite(gamma))
     filled = fill_missing(gamma)
     min_width = max(settings.min_width_mm, 2.0 * spacing)
-    ridge, _ = ridge_strength(gamma, spacing, min_width, settings.max_width_mm)
+    ridge, sigma, normal = ridge_strength(gamma, spacing, min_width, settings.max_width_mm)
     ridge[~valid] = 0.0
 
     med, sd = robust_noise(ridge[valid])
     high = max(med + settings.noise_threshold_k * sd, settings.relative_floor * ridge.max())
-    mask = apply_hysteresis_threshold(ridge, settings.hysteresis_ratio * high, high)
-    paths = extract_paths(mask, settings.min_length_mm / spacing)
+    # Thin ridge lines (non-maximum suppression), then hysteresis along them.
+    thin = np.where(ridge_maxima(ridge, normal), ridge, 0.0)
+    mask = apply_hysteresis_threshold(thin, settings.hysteresis_ratio * high, high)
+    band_scale = FWHM_PER_SIGMA * float(np.median(sigma[mask])) if mask.any() else 0.0
+    paths = extract_paths(mask, settings.min_length_mm / spacing, band_scale)
 
     _, gamma_noise = robust_noise((filled - ndimage.median_filter(filled, NOISE_MEDIAN_SIZE))[valid])
     gamma_noise = max(gamma_noise, 1e-12)
@@ -313,6 +348,15 @@ def _trim_hooks(points: np.ndarray, width: float) -> slice:
     while stop - start > 2 and _end_is_hooked(points[start:stop][::-1], width):
         stop -= 1
     return slice(start, stop)
+
+
+def _bridge_small_holes(valid: np.ndarray) -> np.ndarray:
+    labels, n = ndimage.label(~valid)
+    if n == 0:
+        return valid
+    sizes = ndimage.sum(np.ones_like(labels), labels, index=np.arange(1, n + 1))
+    small = np.isin(labels, np.flatnonzero(sizes <= SMALL_HOLE_POINTS) + 1)
+    return valid | small
 
 
 def _polyline_length(points: np.ndarray) -> float:
@@ -420,7 +464,8 @@ def _label_bands(bands: list[DetectedBand], height: float, tol: float) -> None:
 
 def _primary_metrics(band, x, z, uz, valid, height, z_top, spacing, settings) -> PrimaryMetrics:
     flags: list[str] = []
-    shape = classify(band.points, band.width_mm)
+    shape = classify(_interior(band.points, SHAPE_END_EXCLUSION_WIDTHS * band.width_mm), band.width_mm,
+                     full_band=band.points)
     if shape.ambiguous:
         flags.append("shape-ambiguous")
     lift_off, lift_off_sigma, toe_gap = lift_off_from_model(
@@ -454,6 +499,13 @@ def _primary_metrics(band, x, z, uz, valid, height, z_top, spacing, settings) ->
         length_mm=length, area_mm2=area, heave_mm=heave,
         developed_length_mm=band.length_mm, flags=flags,
     )
+
+
+def _interior(points: np.ndarray, margin_mm: float) -> np.ndarray:
+    """Points more than margin_mm (arc length) from both ends, if enough remain."""
+    s = np.concatenate([[0.0], np.cumsum(np.hypot(*np.diff(points, axis=0).T))])
+    inner = points[(s >= margin_mm) & (s <= s[-1] - margin_mm)]
+    return inner if len(inner) >= max(len(points) // 2, 3) else points
 
 
 def _surface_intersection(points: np.ndarray, height: float, fit_length_mm: float) -> float:

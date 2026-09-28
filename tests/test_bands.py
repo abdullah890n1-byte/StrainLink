@@ -70,3 +70,16 @@ def test_shape_classifier_on_exact_curves():
     composite = medium.primary(30).points[::10]
     result = classify(composite + rng.normal(0, 0.3, composite.shape), 20.0)
     assert result.label == "composite" and not result.ambiguous
+
+
+def test_tracking_gives_onset_and_surface_reach():
+    from strainlink.bands.track import track
+    experiment = WallExperiment(preset("medium"))
+    deltas = [5, 7.5, 10, 12.5, 15, 20, 25, 30]
+    frames = [_detect(experiment, d, noise=0.05, seed=i)[0] for i, d in enumerate(deltas)]
+    history = track(frames, deltas)
+    # band-1 is >= 50 mm long from delta 7.5 mm (medium preset); reaches the surface at 15 mm.
+    assert history.primary.onset_mm in (7.5, 10.0)
+    assert history.primary.surface_reached_mm == 15.0
+    radial = history.by_label("radial")
+    assert len(radial) == 1 and radial[0].onset_mm >= 15.0

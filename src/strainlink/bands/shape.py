@@ -48,6 +48,13 @@ MAX_BACK_EXTENSION_WIDTHS = 4.0
 # the same hypothesis as the simpler model, so they are not counted as rivals.
 DEGENERATE_SWITCH_FRACTION = 0.05
 MIN_TURNING_DEG = 1.0
+# Practical straightness: a band whose best curved model departs from its best
+# straight line by less than this is called linear. Statistics can detect
+# millimetre-scale curvature that no engineer would call a curved slip
+# surface. The same definition labels the synthetic ground truth.
+STRAIGHT_TOLERANCE_MM = 5.0
+# Within +-this fraction of the tolerance the straight/curved call is flagged ambiguous.
+STRAIGHT_BORDERLINE = 0.3
 
 
 @dataclass
@@ -159,7 +166,19 @@ def lift_off_from_model(
     the same definition as lift_off_angle. gap is the distance (mm) from the
     toe to the model's closest point, a check on the extrapolation.
     """
-    fit = shape.best
+    angle, gap = _model_lift_off(shape.best, toe, span_mm, width_mm)
+    # Model uncertainty: plausible alternative shapes (BIC within the "strong
+    # evidence" gap of the winner) can imply different angles at the toe.
+    # Their spread is added to the fit uncertainty, so an ambiguous shape
+    # also makes the lift-off angle honestly uncertain.
+    plausible = [f for f in shape.fits.values() if f.bic - shape.best.bic < STRONG_EVIDENCE_BIC]
+    angles = [_model_lift_off(f, toe, span_mm, width_mm)[0] for f in plausible]
+    spread = (max(angles) - min(angles)) / 2.0 if len(angles) > 1 else 0.0
+    sigma = float(np.hypot(shape.best.alpha_sigma_deg, spread))
+    return angle, sigma, gap
+
+
+def _model_lift_off(fit: "ModelFit", toe: np.ndarray, span_mm: float, width_mm: float) -> tuple[float, float]:
     back = MAX_BACK_EXTENSION_WIDTHS * width_mm
     s = np.arange(-back, span_mm + MODEL_STEP_MM, MODEL_STEP_MM)
     curve = model_points(fit.kind, fit.params, s)
@@ -168,7 +187,7 @@ def lift_off_from_model(
     s_toe = s[nearest]
     head = model_points(fit.kind, fit.params, np.arange(s_toe, s_toe + span_mm + MODEL_STEP_MM, MODEL_STEP_MM))
     angle, _ = lift_off_angle(head, span_mm, width_mm)
-    return angle, fit.alpha_sigma_deg, gap
+    return angle, gap
 
 
 def lift_off_angle(points: np.ndarray, span_mm: float, width_mm: float) -> tuple[float, float]:
@@ -199,8 +218,21 @@ def lift_off_angle(points: np.ndarray, span_mm: float, width_mm: float) -> tuple
     return angle, sigma
 
 
-def classify(points: np.ndarray, band_width_mm: float) -> ShapeResult:
-    """Fit all models to an ordered centreline (from the band's start) and pick by BIC."""
+def deviation_from_line(points: np.ndarray) -> float:
+    """Largest distance (mm) of a polyline from its orthogonal-regression line."""
+    centre = points.mean(axis=0)
+    normal = np.linalg.svd(points - centre, full_matrices=False)[2][1]
+    return float(np.max(np.abs((points - centre) @ normal)))
+
+
+def classify(points: np.ndarray, band_width_mm: float,
+             straight_tolerance_mm: float = STRAIGHT_TOLERANCE_MM,
+             full_band: np.ndarray | None = None) -> ShapeResult:
+    """Fit all models to an ordered centreline (from the band's start) and pick by BIC.
+
+    full_band: the whole detected band when `points` is only its interior.
+    Straightness is judged on the whole band (curvature grows with length).
+    """
     points = np.asarray(points, dtype=float)
     s = _arc_length(points)
     length = s[-1]
@@ -255,7 +287,15 @@ def classify(points: np.ndarray, band_width_mm: float) -> ShapeResult:
     winner = ranked[0]
     rivals = [f for f in ranked[1:] if _reduces_to(f, length) != winner.kind]
     delta = rivals[0].bic - winner.bic if rivals else np.inf
+    ambiguous = bool(delta < STRONG_EVIDENCE_BIC)
+    if winner.kind != "linear":
+        departure = deviation_from_line(points if full_band is None else full_band)
+        if departure < straight_tolerance_mm:
+            winner, delta = fits["linear"], np.inf
+            ambiguous = False
+        borderline = abs(departure - straight_tolerance_mm) < STRAIGHT_BORDERLINE * straight_tolerance_mm
+        ambiguous = ambiguous or borderline
     return ShapeResult(
-        label=winner.kind, ambiguous=bool(delta < STRONG_EVIDENCE_BIC), delta_bic=float(delta),
+        label=winner.kind, ambiguous=ambiguous, delta_bic=float(delta),
         lift_off_deg=winner.alpha_deg, lift_off_sigma_deg=winner.alpha_sigma_deg, fits=fits,
     )

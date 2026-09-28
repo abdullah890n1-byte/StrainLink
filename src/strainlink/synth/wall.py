@@ -33,6 +33,8 @@ from typing import Literal
 import numpy as np
 from scipy import optimize
 from matplotlib.path import Path
+
+from ..bands.shape import STRAIGHT_TOLERANCE_MM, deviation_from_line
 from scipy.spatial import cKDTree
 
 ShapeLabel = Literal["linear", "log-spiral", "composite"]
@@ -249,9 +251,9 @@ class WallExperiment:
         rho0 = self._rho0_for(alpha)
         return float(rho0 * np.expm1(k * abs(np.radians(beta - alpha))) / k)
 
-    def _developed_shape(self, alpha: float, developed_mm: float) -> ShapeLabel:
+    def _developed_shape(self, alpha: float, developed_mm: float, centreline: np.ndarray) -> ShapeLabel:
         spiral = self.spiral_length(alpha)
-        if spiral == 0.0:
+        if spiral == 0.0 or len(centreline) < 3 or deviation_from_line(centreline) < STRAIGHT_TOLERANCE_MM:
             return "linear"
         straight = developed_mm - spiral
         return "composite" if straight >= MIN_STRAIGHT_WIDTHS * self.spec.band_width_mm else "log-spiral"
@@ -350,7 +352,7 @@ class WallExperiment:
                 bands.append(BandTruth(name=band.name, label=label, centreline=curve.points,
                                        reached_end=True, width_mm=spec.band_width_mm))
         alpha = self.lift_off(delta)
-        shape = self._developed_shape(alpha, fraction * primary.length)
+        shape = self._developed_shape(alpha, fraction * primary.length, primary.upto(fraction * primary.length))
         head = primary.upto(max(LIFT_OFF_SPAN_MM, 0.0))
         chord = _line_angle_deg(head)
         complete = fraction >= 1.0
