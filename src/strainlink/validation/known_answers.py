@@ -28,6 +28,8 @@ TOL_TIP_REACH_MM = 2.0
 ONSET_LENGTH_MM = 50.0
 # Band measurements are compared every this many mm of push.
 COMPARE_EVERY_MM = 5.0
+# How many folders above the project to look for the known answers.
+TRUTH_SEARCH_LEVELS = 2
 
 
 @dataclass
@@ -55,10 +57,23 @@ def _polyline_length(points) -> float:
     return float(np.hypot(*np.diff(p, axis=0).T).sum()) if len(p) > 1 else 0.0
 
 
+def find_truth(project_dir: Path) -> Path:
+    """truth.json next to the project, or in the test folder above it.
+
+    The app saves a new analysis in "<test folder>/StrainLink analysis/", so
+    the known answers of a synthetic test folder sit one level up.
+    """
+    for folder in (project_dir, *list(project_dir.parents)[:TRUTH_SEARCH_LEVELS]):
+        candidate = folder / "truth.json"
+        if candidate.exists():
+            return candidate
+    raise FileNotFoundError("no truth.json: only synthetic tests have known answers")
+
+
 def compare(project_dir: str | Path) -> dict:
     """All checks for an analysed synthetic project. Raises FileNotFoundError without truth.json."""
     project_dir = Path(project_dir)
-    truth = json.loads((project_dir / "truth.json").read_text())
+    truth = json.loads(find_truth(project_dir).read_text())
     summary = json.loads((project_dir / "results" / "summary.json").read_text())
     checks: list[Check] = []
     m, p = summary["mechanics"], summary["bands"]["primary"]
