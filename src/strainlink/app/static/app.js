@@ -375,7 +375,7 @@ async function openResults(path) {
   $("#res-title").textContent = s.project;
   $("#res-meta").textContent = `${s.frames} photos · analysed ${s.finished} · ${Math.round(s.seconds)} s · StrainLink ${s.version}`;
   $("#res-synthetic").classList.toggle("hidden", !s.synthetic);
-  renderCards(s); renderFindings(s); renderReview(s);
+  renderCards(s); renderFindings(s); renderReview(s); renderAccuracy(path);
   const n = s.frames - 1;
   [$("#scrub-overview"), $("#scrub-soil")].forEach((el) => { el.max = n; el.value = n; });
   state.frame = n;
@@ -418,14 +418,38 @@ function renderReview(s) {
   $("#review-flags").innerHTML = s.flags.length ? s.flags.map((f) => `<div class="flagitem">⚑ <span>${esc(f)}</span></div>`).join("")
     : '<p class="muted">Nothing needs your review: all results are within the validated tolerances.</p>';
 }
+async function renderAccuracy(path) {
+  const r = await api().accuracy(path);
+  $("#tab-accuracy").classList.toggle("hidden", !r.ok);
+  if (!r.ok) return;
+  const all = r.passed === r.total;
+  $("#acc-banner").className = `acc-banner ${all ? "good" : "warn"}`;
+  $("#acc-banner").innerHTML = `<b>${r.passed} of ${r.total}</b> checks within tolerance${all ? " — every automatic result matches the known answer." : " — see the ✗ rows below."}`;
+  const groups = [...new Set(r.checks.map((c) => c.group))];
+  $("#acc-table").innerHTML = groups.map((g) => {
+    const rows = r.checks.filter((c) => c.group === g).map((c) => `<tr class="${c.ok ? "" : "bad"}">
+      <td class="mark">${c.ok ? "✓" : "✗"}</td><td>${esc(c.item)}${c.note ? `<div class="muted small">${esc(c.note)}</div>` : ""}</td>
+      <td>${esc(c.found)}</td><td>${esc(c.true)}</td><td>${esc(c.error)}</td><td class="muted">${esc(c.tolerance)}</td></tr>`).join("");
+    const ok = r.checks.filter((c) => c.group === g && c.ok).length, n = r.checks.filter((c) => c.group === g).length;
+    return `<h3>${esc(g)} <span class="muted small">${ok}/${n}</span></h3><table class="acc"><thead><tr><th></th><th>What</th><th>StrainLink found</th><th>True answer</th><th>Error</th><th>Tolerance</th></tr></thead><tbody>${rows}</tbody></table>`;
+  }).join("");
+}
 $$("#res-tabs button").forEach((b) => b.onclick = () => selectTab(b.dataset.tab));
 function selectTab(tab) {
   $$("#res-tabs button").forEach((b) => b.classList.toggle("on", b.dataset.tab === tab));
   $$("#view-results .tab").forEach((t) => t.classList.toggle("hidden", t.dataset.tab !== tab));
-  if (tab === "overview") drawOverview();
-  if (tab === "soil") { drawBandPlots(); showFrame(state.frame); }
   if (tab !== "soil") stopPlay();
+  // Draw after the tab is laid out: a chart drawn into a hidden box gets zero width.
+  requestAnimationFrame(() => {
+    if (tab === "overview") drawOverview();
+    if (tab === "soil") { drawBandPlots(); showFrame(state.frame); }
+    fitCharts();
+  });
 }
+function fitCharts() {
+  $$("#view-results .tab:not(.hidden) .plot").forEach((el) => { if (el.data) Plotly.Plots.resize(el); });
+}
+window.addEventListener("resize", fitCharts);
 function plotLayout(xTitle, yTitle) {
   return { margin: { l: 56, r: 16, t: 26, b: 44 }, paper_bgcolor: "rgba(0,0,0,0)", plot_bgcolor: "rgba(0,0,0,0)",
     font: { family: "-apple-system, sans-serif", size: 12, color: css("--ink") },

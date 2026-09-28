@@ -30,6 +30,13 @@ def test_pipeline_runs_and_writes_results(small_project):
         assert any("matched to the logger" in f for f in summary.flags)
     assert report.build(results).exists()
 
+    from strainlink.validation.known_answers import compare
+    accuracy = compare(small_project.parent)
+    assert accuracy["total"] >= 5
+    json.dumps(accuracy)      # must be sendable to the app
+    sensor_checks = [c for c in accuracy["checks"] if c["group"] == "Sensor results"]
+    assert all(c["ok"] for c in sensor_checks)
+
 
 def test_missing_sensor_file_gives_a_clear_message(tmp_path):
     project = tmp_path / "project.json"
