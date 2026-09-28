@@ -17,6 +17,7 @@ dependencies = [
     "scikit-learn>=1.5",
     "tifffile>=2024.1",
     "openpyxl>=3.1",
+    "matplotlib>=3.8",
 ]
 
 [project.optional-dependencies]
