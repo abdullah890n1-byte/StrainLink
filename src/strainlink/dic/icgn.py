@@ -11,6 +11,8 @@ Parameter vector per subset: p = [u, du/dx, du/dy, v, dv/dx, dv/dy].
 
 from __future__ import annotations
 
+import os
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
 import numpy as np
@@ -18,11 +20,16 @@ import numpy as np
 from .image import SplineImage
 
 N_PARAMS = 6
-# Subsets per batch: bounds peak memory (chunk * subset_pixels * 8 bytes
-# per working array) to a few hundred MB for 41x41 subsets.
-CHUNK_SIZE = 1500
+# Subsets per batch. Each batch needs ~25 MB of working arrays for 21x21
+# subsets and WORKERS batches run at once. 1500 (~90 MB each, ~720 MB with 8
+# workers) is suspected of pushing an 8 GB Mac into swapping (multi-minute
+# stalls in testing; fix not yet confirmed, see Bugs.md).
+CHUNK_SIZE = 400
 # A subset with (almost) uniform intensity has no texture to correlate.
 MIN_INTENSITY_SPREAD = 1e-6
+# Chunks are solved in parallel threads: the heavy work (spline sampling,
+# einsum) runs in C and releases the GIL, measured 3.3x faster on 8 cores.
+WORKERS = max(1, (os.cpu_count() or 1))
 
 
 @dataclass
@@ -62,6 +69,24 @@ def _warp_matrices(p: np.ndarray) -> np.ndarray:
     return m
 
 
+def _invert_affine(m: np.ndarray) -> np.ndarray:
+    """Exact inverse of homogeneous 2D affine matrices (N, 3, 3), without LAPACK.
+
+    Called every iteration for every subset; a closed form is faster and keeps
+    linear-algebra library threads out of the parallel workers.
+    """
+    a, b, tx = m[:, 0, 0], m[:, 0, 1], m[:, 0, 2]
+    c, d, ty = m[:, 1, 0], m[:, 1, 1], m[:, 1, 2]
+    det = a * d - b * c
+    out = np.zeros_like(m)
+    out[:, 0, 0], out[:, 0, 1] = d / det, -b / det
+    out[:, 1, 0], out[:, 1, 1] = -c / det, a / det
+    out[:, 0, 2] = -(out[:, 0, 0] * tx + out[:, 0, 1] * ty)
+    out[:, 1, 2] = -(out[:, 1, 0] * tx + out[:, 1, 1] * ty)
+    out[:, 2, 2] = 1.0
+    return out
+
+
 def _params_from_matrices(m: np.ndarray) -> np.ndarray:
     return np.stack(
         [m[:, 0, 2], m[:, 0, 0] - 1.0, m[:, 0, 1], m[:, 1, 2], m[:, 1, 0], m[:, 1, 1] - 1.0],
@@ -92,12 +117,14 @@ def refine(
     zncc = np.full(n, np.nan)
     iterations = np.zeros(n, dtype=int)
     converged = np.zeros(n, dtype=bool)
-    for start in range(0, n, CHUNK_SIZE):
-        sl = slice(start, min(start + CHUNK_SIZE, n))
-        p, z, it, ok = _refine_chunk(
-            reference, current, centres_x[sl], centres_y[sl], params[sl], radius, settings
-        )
-        params[sl], zncc[sl], iterations[sl], converged[sl] = p, z, it, ok
+    slices = [slice(s, min(s + CHUNK_SIZE, n)) for s in range(0, n, CHUNK_SIZE)]
+
+    def solve(sl: slice):
+        return sl, _refine_chunk(reference, current, centres_x[sl], centres_y[sl], params[sl], radius, settings)
+
+    with ThreadPoolExecutor(max_workers=min(WORKERS, max(len(slices), 1))) as pool:
+        for sl, (p, z, it, ok) in pool.map(solve, slices):
+            params[sl], zncc[sl], iterations[sl], converged[sl] = p, z, it, ok
     return ICGNResult(params=params, zncc=zncc, iterations=iterations, converged=converged)
 
 
@@ -143,7 +170,7 @@ def _refine_chunk(reference, current, cx, cy, params, radius, settings):
         bad = ~np.all(np.isfinite(dp), axis=1)
         dp[bad] = 0.0
         # Inverse-compositional update: W(p) <- W(p) o W(dp)^-1.
-        warps[idx] = m @ np.linalg.inv(_warp_matrices(dp))
+        warps[idx] = m @ _invert_affine(_warp_matrices(dp))
 
         step = np.sqrt(
             dp[:, 0] ** 2 + dp[:, 3] ** 2

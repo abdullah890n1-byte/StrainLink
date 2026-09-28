@@ -8,8 +8,14 @@ search window around a prior guess.
 
 from __future__ import annotations
 
+import os
+from concurrent.futures import ThreadPoolExecutor
+
 import cv2
 import numpy as np
+
+# OpenCV's matchTemplate releases the GIL, so subsets are searched in parallel threads.
+WORKERS = max(1, (os.cpu_count() or 1))
 
 
 def integer_search(
@@ -37,10 +43,14 @@ def integer_search(
     v = np.full(n, np.nan)
     peak = np.full(n, np.nan)
 
-    for i in range(n):
+    def search(indices: range) -> None:
+        for i in indices:
+            _search_one(i)
+
+    def _search_one(i: int) -> None:
         tx, ty = int(round(centres_x[i])), int(round(centres_y[i]))
         if not (radius <= tx < reference.shape[1] - radius and radius <= ty < reference.shape[0] - radius):
-            continue
+            return
         template = ref32[ty - radius: ty + radius + 1, tx - radius: tx + radius + 1]
         sx = tx + int(round(prior_u[i]))
         sy = ty + int(round(prior_v[i]))
@@ -48,10 +58,14 @@ def integer_search(
         y0, y1 = sy - radius - search_radius, sy + radius + search_radius + 1
         x0c, y0c, x1c, y1c = max(x0, 0), max(y0, 0), min(x1, width), min(y1, height)
         if x1c - x0c < template.shape[1] or y1c - y0c < template.shape[0]:
-            continue
+            return
         response = cv2.matchTemplate(cur32[y0c:y1c, x0c:x1c], template, cv2.TM_CCOEFF_NORMED)
         _, best, _, loc = cv2.minMaxLoc(response)
         u[i] = x0c + loc[0] + radius - tx
         v[i] = y0c + loc[1] + radius - ty
         peak[i] = best
+
+    blocks = [range(s, min(s + max(n // WORKERS, 1), n)) for s in range(0, n, max(n // WORKERS, 1))]
+    with ThreadPoolExecutor(max_workers=WORKERS) as pool:
+        list(pool.map(search, blocks))
     return u, v, peak

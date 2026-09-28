@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>StrainLink</title>
+<link rel="stylesheet" href="app.css">
+<script src="plotly.min.js"></script>
+</head>
+<body>
+<header class="topbar">
+  <div class="brand" data-go="home">
+    <svg viewBox="0 0 32 32" class="logo" aria-hidden="true"><rect x="2" y="2" width="28" height="28" rx="8"/><path d="M7 22 C 12 21, 16 16, 25 8" /><path d="M9 25 L 24 25" class="ground"/></svg>
+    <span>StrainLink</span>
+  </div>
+  <nav class="crumbs" id="crumbs"></nav>
+  <div class="topright"><span id="version" class="muted small"></span></div>
+</header>
+
+<main id="app">
+  <!-- HOME -->
+  <section id="view-home" class="view">
+    <div class="hero">
+      <h1>Analyse a soil model test</h1>
+      <p class="lead">Photos and sensor logs in — shear bands, engineering results and evidence-backed findings out. Every number comes with its uncertainty, and anything uncertain is flagged for you.</p>
+    </div>
+    <div class="actions">
+      <button class="action" id="btn-new">
+        <span class="icon">＋</span><span class="t">New analysis</span><span class="d">Drop your test folder: StrainLink finds the photos and logger files, then asks four short questions.</span>
+      </button>
+      <button class="action" id="btn-open">
+        <span class="icon">↗</span><span class="t">Open analysis</span><span class="d">Continue or review a saved StrainLink project.</span>
+      </button>
+      <div class="action demo">
+        <span class="icon">▶</span><span class="t">Try a demo</span><span class="d">A synthetic test with known answers. First run takes a few minutes.</span>
+        <div class="segmented" id="demo-choice">
+          <button data-preset="loose">Loose sand</button><button data-preset="medium" class="on">Medium</button><button data-preset="dense">Dense</button>
+        </div>
+        <button class="primary small" id="btn-demo">Run demo</button>
+      </div>
+    </div>
+    <div class="recent">
+      <h3>Recent</h3>
+      <ul id="recent-list"><li class="muted">Nothing yet.</li></ul>
+    </div>
+  </section>
+
+  <!-- WIZARD -->
+  <section id="view-wizard" class="view hidden">
+    <aside class="rail">
+      <ol id="steps">
+        <li data-step="0">Test files</li><li data-step="1">Scale &amp; wall</li><li data-step="2">Test details</li><li data-step="3">Run</li>
+      </ol>
+      <p class="muted small rail-note">Your data stays on this Mac.</p>
+    </aside>
+    <div class="stepwrap">
+      <!-- step 0: files -->
+      <div class="step" data-step="0">
+        <h2>Your test files</h2>
+        <p class="muted">Choose the folder of your test. StrainLink finds the photos, the data-logger file and the calibration run inside it.</p>
+        <div class="dropzone" id="dropzone">
+          <div class="dz-icon">⬇︎</div>
+          <div><b>Drop your test folder here</b></div>
+          <div class="muted small">or</div>
+          <button class="primary" id="pick-folder">Choose test folder…</button>
+        </div>
+        <div id="found" class="hidden">
+          <div class="found-list">
+            <div class="found-item" id="found-photos"><span class="st"></span><div class="what"><b>Photos</b><span class="detail"></span></div><button class="small" data-change="photos">Change…</button></div>
+            <div class="found-item" id="found-logger"><span class="st"></span><div class="what"><b>Data-logger file</b><span class="detail"></span></div><button class="small" data-change="logger">Change…</button></div>
+            <div class="found-item" id="found-cal"><span class="st"></span><div class="what"><b>Calibration run</b> <span class="muted small">(optional: removes base friction)</span><span class="detail"></span></div><button class="small" data-change="cal">Change…</button></div>
+          </div>
+          <div class="thumbs hidden" id="thumbs"><figure><img id="thumb-first"><figcaption id="cap-first"></figcaption></figure><figure><img id="thumb-last"><figcaption id="cap-last"></figcaption></figure></div>
+          <div id="interval-box" class="notice hidden">
+            <b>How often were the photos taken?</b> The photos carry no camera time stamps.
+            <div class="row"><label class="inline">One photo every <input type="number" id="interval" min="0" step="any" placeholder="5"> seconds</label></div>
+          </div>
+          <details id="mapping-box" class="mapping-box">
+            <summary><span id="mapping-summary">Check the logger columns</span></summary>
+            <table class="mapping"><thead><tr><th>Column in your file</th><th>First values</th><th>What it is</th><th>Name</th><th>Unit</th><th></th></tr></thead><tbody id="mapping-body"></tbody></table>
+          </details>
+          <div id="mapping-warn" class="notice warn hidden"></div>
+        </div>
+      </div>
+      <!-- step 1: calibrate -->
+      <div class="step hidden" data-step="1">
+        <h2>Scale &amp; wall</h2>
+        <p class="muted">Two clicks on the first photo: the ends of something of known length, then the bottom corner of the wall face (the toe).</p>
+        <div class="toolbar">
+          <button class="tool on" data-tool="scale">① Scale: click two points</button>
+          <label class="inline">that are <input type="number" id="scale-mm" value="100" min="0" step="any"> mm apart</label>
+          <button class="tool" data-tool="toe">② Click the wall toe</button>
+          <span class="sep"></span>
+          <label class="inline muted">or type the scale <input type="number" id="scale-direct" min="0" step="any" placeholder="mm/px"> mm/px</label>
+        </div>
+        <div class="canvaswrap"><canvas id="cal-canvas"></canvas></div>
+        <div class="row"><label class="inline">Retained soil height at the wall (effective height H) <input type="number" id="wall-h" value="390" min="0" step="any"> mm</label></div>
+        <div class="facts" id="cal-facts"></div>
+      </div>
+      <!-- step 2: test details -->
+      <div class="step hidden" data-step="2">
+        <h2>Test details</h2>
+        <p class="muted small">Filled in from your last test where possible.</p>
+        <div class="formgrid">
+          <label>Name of this test <input type="text" id="proj-name" placeholder="e.g. RW-MDS, medium-dense sand"></label>
+          <label>Backfill unit weight γ <span class="unit"><input type="number" id="gamma" step="any" placeholder="e.g. 14.13"> kN/m³</span></label>
+          <label>Wall width (into the page) <span class="unit"><input type="number" id="wall-w" step="any" value="700"> mm</span></label>
+          <label>Wall weight <span class="unit"><input type="number" id="wall-weight" step="any" placeholder="optional"> kN</span><small class="muted">Only needed for the wall friction angle δmob.</small></label>
+        </div>
+        <h3>Pressure cells <span class="muted small">— depth of each cell below the soil surface</span></h3>
+        <table class="mapping narrow"><thead><tr><th>Cell</th><th>Depth (mm)</th></tr></thead><tbody id="cells-body"></tbody></table>
+        <details class="mapping-box"><summary>Advanced: matching photos to the logger clock</summary>
+          <div class="radios">
+            <label><input type="radio" name="sync" value="dic" checked> Automatic <span class="muted">(recommended: from the wall movement seen in the photos)</span></label>
+            <label><input type="radio" name="sync" value="offset"> I know it: the first photo was taken at <input type="number" id="sync-offset" step="any" class="short"> s on the logger clock</label>
+            <label><input type="radio" name="sync" value="push-step"> A photo was taken every <input type="number" id="sync-step" step="any" class="short"> mm of wall push</label>
+          </div>
+        </details>
+      </div>
+      <!-- step 3: review and run -->
+      <div class="step hidden" data-step="3">
+        <h2>Ready to run</h2>
+        <div id="review-list" class="review"></div>
+        <p class="muted small">The analysis is saved in <span id="save-path-label"></span> <button class="link" id="pick-save">change</button></p>
+        <button class="primary big" id="btn-run">Run analysis</button>
+        <p class="muted small">Typically 1–3 minutes for 60 photos.</p>
+      </div>
+      <footer class="stepnav">
+        <button id="btn-back">Back</button>
+        <span id="step-hint" class="muted small"></span>
+        <button class="primary" id="btn-next">Next</button>
+      </footer>
+    </div>
+  </section>
+
+  <!-- RUNNING -->
+  <section id="view-running" class="view hidden">
+    <div class="runcard">
+      <h2 id="run-title">Analysing</h2>
+      <div class="bar"><div id="run-bar"></div></div>
+      <p id="run-message" class="muted"></p>
+      <ol id="run-stages" class="stages"></ol>
+      <p class="muted small" id="run-elapsed"></p>
+      <div id="run-error" class="notice warn hidden"></div>
+      <button id="run-back" class="hidden">Back</button>
+    </div>
+  </section>
+
+  <!-- RESULTS -->
+  <section id="view-results" class="view hidden">
+    <div class="reshead">
+      <div><h2 id="res-title"></h2><div id="res-meta" class="muted small"></div></div>
+      <div class="resbtns"><button id="btn-report" class="primary">Open report</button><button id="btn-finder">Show in Finder</button></div>
+    </div>
+    <div id="res-synthetic" class="synthetic hidden">SYNTHETIC DATA — a generated test with known answers, not a real experiment.</div>
+    <div class="cards" id="res-cards"></div>
+    <div class="tabs" id="res-tabs">
+      <button data-tab="overview" class="on">Overview</button><button data-tab="soil">Slip surface</button><button data-tab="findings">Findings</button><button data-tab="review">Review <span id="review-count" class="count"></span></button>
+    </div>
+    <div class="tab" data-tab="overview">
+      <div class="two"><div id="plot-force" class="plot"></div><div id="plot-cells" class="plot"></div></div>
+      <div class="scrub"><span class="muted small">Photo</span><input type="range" id="scrub-overview" min="0" value="0"><span id="scrub-overview-label" class="small"></span></div>
+    </div>
+    <div class="tab hidden" data-tab="soil">
+      <div class="viewer">
+        <div class="stage-img"><img id="frame-img"><svg id="frame-svg"></svg><div id="frame-loading" class="loading hidden">Loading…</div></div>
+        <aside class="frame-side">
+          <div class="controls"><button id="play" title="Play">▶</button><input type="range" id="scrub-soil" min="0" value="0"><label class="inline small"><input type="checkbox" id="show-strain" checked> Strain</label></div>
+          <div id="frame-label" class="big-label"></div>
+          <div id="frame-metrics" class="metrics"></div>
+          <div id="legend" class="legend"></div>
+        </aside>
+      </div>
+      <div class="three"><div id="plot-len" class="plot small"></div><div id="plot-lift" class="plot small"></div><div id="plot-area" class="plot small"></div></div>
+    </div>
+    <div class="tab hidden" data-tab="findings"><p class="muted small">Graded by the strength of the evidence. Every statement is computed from your data; open a finding to see the numbers and the method.</p><div id="findings-list"></div></div>
+    <div class="tab hidden" data-tab="review"><div id="review-flags"></div></div>
+  </section>
+</main>
+<div id="toast" class="toast hidden"></div>
+<script src="app.js"></script>
+</body>
+</html>

@@ -14,12 +14,17 @@ from dataclasses import dataclass, field
 from typing import Callable, Literal, Sequence
 
 import numpy as np
+from scipy import ndimage
 
 from .icgn import ICGNSettings, refine
 from .image import SplineImage
 from .initial import integer_search
 
 ReferenceMode = Literal["fixed", "incremental"]
+# Re-seeding looks at this square neighbourhood (grid points) and needs at least
+# this many tracked neighbours around a lost point.
+RESEED_NEIGHBOURHOOD = 3
+RESEED_MIN_NEIGHBOURS = 4
 
 
 @dataclass
@@ -33,6 +38,7 @@ class DICSettings:
     update_below_zncc: float = 0.95
     # …or after this many frames regardless (0 disables the frame limit).
     update_every: int = 0
+    reseed: bool = True              # try to recover lost points from their neighbours' motion
     icgn: ICGNSettings = field(default_factory=ICGNSettings)
 
 
@@ -171,12 +177,14 @@ def track_sequence(
     reference = SplineImage.from_array(images[0])
     for k in range(1, n_frames):
         current = SplineImage.from_array(images[k], with_gradients=False)
+        if settings.reseed and ref_index > 0:
+            _reseed(xs, ys, valid, ref_index, grid)
         ref_x, ref_y = xs[ref_index], ys[ref_index]
         # Prior = motion accumulated since the reference (previous frame's result).
         prior_u = xs[k - 1] - ref_x
         prior_v = ys[k - 1] - ref_y
         pair = correlate_pair(reference, current, ref_x, ref_y, settings, prior_u, prior_v)
-        still_tracked = valid[ref_index] & pair.valid
+        still_tracked = np.isfinite(ref_x) & pair.valid
         xs[k] = np.where(still_tracked, ref_x + pair.u, np.nan)
         ys[k] = np.where(still_tracked, ref_y + pair.v, np.nan)
         zncc[k] = pair.zncc
@@ -192,6 +200,34 @@ def track_sequence(
     return TrackingResult(
         grid=grid, x=xs, y=ys, zncc=zncc, valid=valid, reference_frames=reference_frames
     )
+
+
+def _reseed(xs: np.ndarray, ys: np.ndarray, valid: np.ndarray, frame: int, grid: Grid) -> None:
+    """Estimate positions of lost points in `frame` from their neighbours' motion.
+
+    A point lost once would otherwise stay lost for the rest of the test.
+    Its displacement is filled from the nearest tracked neighbours on the
+    (reference) grid; if the next correlation succeeds, it rejoins. Only
+    points with tracked neighbours around them are re-seeded.
+    """
+    lost = ~valid[frame]
+    if not lost.any() or valid[frame].sum() < 4:
+        return
+    shape = grid.shape
+    u = (xs[frame] - xs[0]).reshape(shape)
+    v = (ys[frame] - ys[0]).reshape(shape)
+    known = valid[frame].reshape(shape)
+    neighbours = ndimage.uniform_filter(known.astype(float), size=RESEED_NEIGHBOURHOOD, mode="constant")
+    eligible = (~known) & (neighbours * RESEED_NEIGHBOURHOOD**2 >= RESEED_MIN_NEIGHBOURS)
+    if not eligible.any():
+        return
+    _, (rows, cols) = ndimage.distance_transform_edt(~known, return_indices=True)
+    # Average of the nearest known values, smoothed over the neighbourhood.
+    u_fill = ndimage.uniform_filter(np.where(known, u, u[rows, cols]), size=RESEED_NEIGHBOURHOOD)
+    v_fill = ndimage.uniform_filter(np.where(known, v, v[rows, cols]), size=RESEED_NEIGHBOURHOOD)
+    idx = np.flatnonzero(eligible.ravel())
+    xs[frame, idx] = xs[0, idx] + u_fill.ravel()[idx]
+    ys[frame, idx] = ys[0, idx] + v_fill.ravel()[idx]
 
 
 def _should_update(k: int, ref_index: int, pair: PairResult, settings: DICSettings) -> bool:
