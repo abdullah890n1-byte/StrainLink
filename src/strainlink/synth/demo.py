@@ -45,7 +45,7 @@ PIXEL_SAMPLES = 2
 MODEL_GRID_PX = 2
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, eq=False)
 class DemoSpec:
     preset: str = "medium"
     mm_per_px: float = 1.0
@@ -53,6 +53,10 @@ class DemoSpec:
     image_noise_grey: float = 1.5      # camera noise (grey levels)
     grain_radius_px: float = 2.0
     seed: int = 11
+    # Optional real soil texture: a greyscale photo patch (px, 0-255) used
+    # instead of the generated grains, and a note on where it came from.
+    texture_pixels: np.ndarray | None = None
+    texture_source: str = ""
 
 
 def _frame(spec: DemoSpec, wall_height: float) -> tuple[WallFrame, tuple[int, int]]:
@@ -106,7 +110,10 @@ def make_demo(folder: str | Path, spec: DemoSpec | None = None,
     logs = generate(experiment, sensors)
     wall_height = experiment.spec.wall_height_mm
     frame, shape = _frame(spec, wall_height)
-    texture = SpeckleTexture.granular(shape, grain_radius_px=spec.grain_radius_px, seed=spec.seed)
+    if spec.texture_pixels is not None:
+        texture = SpeckleTexture.from_image(spec.texture_pixels, shape)
+    else:
+        texture = SpeckleTexture.granular(shape, grain_radius_px=spec.grain_radius_px, seed=spec.seed)
     rng = np.random.default_rng(spec.seed)
 
     for k, push in enumerate(logs.frame_push_mm):
@@ -118,7 +125,7 @@ def make_demo(folder: str | Path, spec: DemoSpec | None = None,
     logs.logger.to_csv(folder / "logger.csv", index=False)
     logs.calibration.to_csv(folder / "calibration.csv", index=False)
     project = {
-        "name": f"Synthetic demo — {spec.preset} sand (SYNTHETIC DATA)",
+        "name": f"Synthetic demo — {spec.preset} sand{', real sand texture' if spec.texture_source else ''} (SYNTHETIC DATA)",
         "synthetic": True,
         "images": {"folder": "images", "interval_s": float(logs.camera_times_s[1] - logs.camera_times_s[0])},
         "sensors": {"file": "logger.csv", "calibration_file": "calibration.csv"},
@@ -133,6 +140,7 @@ def make_demo(folder: str | Path, spec: DemoSpec | None = None,
     truth = {
         **logs.truth,
         "preset": spec.preset,
+        "texture": spec.texture_source or "generated grains",
         "frame_push_mm": logs.frame_push_mm.tolist(),
         "lift_off_span_deg": [t.lift_off_span_deg for t in truths],
         "shape": [t.shape for t in truths],

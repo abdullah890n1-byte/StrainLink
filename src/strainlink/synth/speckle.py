@@ -61,6 +61,30 @@ class SpeckleTexture:
         coeffs = ndimage.spline_filter(texture, order=3, mode="mirror")
         return cls(coeffs=coeffs, shape=shape)
 
+    @classmethod
+    def from_image(cls, pixels: np.ndarray, shape: tuple[int, int],
+                   contrast: tuple[float, float] = (40.0, 210.0)) -> "SpeckleTexture":
+        """Texture from a real photo of soil, so known-answer tests use real grain appearance.
+
+        The grey levels are kept as photographed: the texture is scaled so
+        that rendering with the same `contrast` reproduces them. The patch
+        is mirror-tiled if it is smaller than `shape` (mirror seams keep
+        the texture continuous; DIC matches translations, not reflections,
+        so a mirrored copy is not a false match).
+        """
+        patch = np.asarray(pixels, dtype=np.float64)
+        reps = (-(-shape[0] // patch.shape[0]), -(-shape[1] // patch.shape[1]))
+        rows = [patch if i % 2 == 0 else patch[::-1] for i in range(reps[0])]
+        column = np.vstack(rows)
+        tiles = [column if j % 2 == 0 else column[:, ::-1] for j in range(reps[1])]
+        tiled = np.hstack(tiles)[:shape[0], :shape[1]]
+        dark, light = contrast
+        texture = (tiled - dark) / (light - dark)
+        # grid_mode aligns pixel areas, matching evaluate()'s pixel-centre convention.
+        fine = ndimage.zoom(texture, SUPERSAMPLE, order=3, mode="grid-mirror", grid_mode=True)
+        coeffs = ndimage.spline_filter(fine, order=3, mode="mirror")
+        return cls(coeffs=coeffs, shape=shape)
+
     def evaluate(self, x: np.ndarray, y: np.ndarray) -> np.ndarray:
         fine_x = (x + 0.5) * SUPERSAMPLE - 0.5
         fine_y = (y + 0.5) * SUPERSAMPLE - 0.5

@@ -42,6 +42,9 @@ CORE_PERCENTILE = 25
 CROSSING_GAP_WIDTHS = 2.5
 # Share of NaN strain around a band above which it is flagged as near a data gap.
 DATA_GAP_FRACTION = 0.1
+# A band whose continuation past an end meets missing data inside the soil
+# within this many band widths is flagged: it may continue through the gap.
+END_GAP_WIDTHS = 1.5
 # Lift-off uncertainty (1 sigma, degrees) above which the angle is flagged: at
 # 1.5 deg the 95% range reaches the +-3 deg accuracy tolerance.
 LIFT_OFF_SIGMA_LIMIT_DEG = 1.5
@@ -82,6 +85,17 @@ EDGE_ARTEFACT_FRACTION = 0.6
 # a data edge) is unverifiable: a broad diffuse zone cut by an edge looks
 # narrow from one side. Such paths are rejected.
 MAX_ONE_SIDED_FRACTION = 0.5
+# A skeleton path can run from a real band straight on along a data edge (in
+# real photos: the sand base, the surface, lost-correlation patches). Points
+# measured from one side only along an edge are unreliable, so the band core
+# is judged without such stretches when at least this many other points exist...
+MIN_TWO_SIDED_CORE_POINTS = 5
+# ...and a stretch that is more than EDGE_HUGGING_SHARE one-sided over this many
+# core widths (i.e. one-sided for ~3.5 widths) hugs an edge and breaks the band
+# there. A band leaving the surface or the wall-top corner at a shallow angle is
+# legitimately one-sided for up to ~3 widths (radial band at ~28 deg), so it stays.
+EDGE_HUGGING_WIDTHS = 5.0
+EDGE_HUGGING_SHARE = 0.7
 # End runs of centreline points separated from the rest by a gap larger than
 # this (grid steps) and shorter than one band width are stray points.
 STRAY_GAP_GRID = 3.0
@@ -183,9 +197,15 @@ def _localised_run(line: cl.Centreline, max_width_grid: float, tip_width_factor:
         return None
     # The core is the band's sharpest part: a path can be mostly diffuse zone
     # with a short sharp band at one end, so medians would describe the zone.
-    core_width = np.percentile(line.fwhm_grid[narrow], CORE_PERCENTILE)
-    core_peak = np.percentile(line.peak[narrow], 100 - CORE_PERCENTILE)
+    core_width, core_peak = _core(line, narrow)
+    # A stretch hugging a data edge (long, mostly one-sided) is not part of
+    # the band, and its guessed one-sided widths must not set the core.
+    hugging = _edge_hugging(line.one_sided, EDGE_HUGGING_WIDTHS * core_width)
+    if hugging.any() and (narrow & ~hugging).sum() >= MIN_TWO_SIDED_CORE_POINTS:
+        core_width, core_peak = _core(line, narrow & ~hugging)
+        hugging = _edge_hugging(line.one_sided, EDGE_HUGGING_WIDTHS * core_width)
     good = narrow & (line.fwhm_grid <= tip_width_factor * core_width) & (line.peak >= TIP_PEAK_FRACTION * core_peak)
+    good &= ~hugging
     runs = _runs(good)
     if not runs:
         return None
@@ -198,6 +218,24 @@ def _localised_run(line: cl.Centreline, max_width_grid: float, tip_width_factor:
             merged.append([start, stop])
     best = max(merged, key=lambda r: good[r[0]:r[1]].sum())
     return best[0] + np.flatnonzero(good[best[0]:best[1]])
+
+
+def _core(line: cl.Centreline, points: np.ndarray) -> tuple[float, float]:
+    """Width and peak of a band's sharpest quarter, over the given points."""
+    return (float(np.percentile(line.fwhm_grid[points], CORE_PERCENTILE)),
+            float(np.percentile(line.peak[points], 100 - CORE_PERCENTILE)))
+
+
+def _edge_hugging(one_sided: np.ndarray, window_points: float) -> np.ndarray:
+    """Points in a stretch (about window_points long) that is mostly measured from one side."""
+    window = max(int(round(window_points)), 1)
+    if len(one_sided) < window:
+        return np.zeros(len(one_sided), dtype=bool)
+    # Beyond the path ends counts as two-sided, so a short one-sided end (a
+    # band meeting the surface) is not mistaken for an edge-hugging stretch.
+    share = ndimage.uniform_filter1d(one_sided.astype(float), window, mode="constant", cval=0.0)
+    # A point hugs an edge if any window containing it is mostly one-sided.
+    return (ndimage.maximum_filter1d(share, window, mode="nearest") > EDGE_HUGGING_SHARE) & one_sided
 
 
 def _runs(flags: np.ndarray) -> list[tuple[int, int]]:
@@ -264,8 +302,10 @@ def detect_bands(
         points = _to_mm(x, z, rows, cols)
         hook_free = _trim_hooks(points, width)
         points, width_profile = points[hook_free], width_profile[hook_free]
+        rows, cols = rows[hook_free], cols[hook_free]
         connected = _drop_stray_ends(points, width, STRAY_GAP_GRID * spacing)
         points, width_profile = points[connected], width_profile[connected]
+        rows, cols = rows[connected], cols[connected]
         if len(points) < 2 or _polyline_length(points) < settings.min_length_mm:
             continue
         if width > settings.max_width_mm:
@@ -277,7 +317,7 @@ def detect_bands(
             name="", label="", points=points, width_mm=width, width_profile_mm=width_profile,
             peak_gamma=peak, snr=peak / gamma_noise, reached_end=False,
         )
-        _band_flags(band, valid, rows, cols, settings)
+        _band_flags(band, valid, z, rows, cols, settings, width / spacing)
         bands.append(band)
 
     _label_bands(bands, wall_height_mm, settings.attach_tolerance_mm)
@@ -364,7 +404,8 @@ def _polyline_length(points: np.ndarray) -> float:
     return float(np.hypot(seg[:, 0], seg[:, 1]).sum())
 
 
-def _band_flags(band: DetectedBand, valid: np.ndarray, rows, cols, settings: DetectionSettings) -> None:
+def _band_flags(band: DetectedBand, valid: np.ndarray, z: np.ndarray, rows, cols, settings: DetectionSettings,
+                width_grid: float) -> None:
     if band.snr < MIN_SNR:
         band.flags.append("low-contrast")
     if band.width_mm > WIDTH_LIMIT_FRACTION * settings.max_width_mm:
@@ -376,6 +417,41 @@ def _band_flags(band: DetectedBand, valid: np.ndarray, rows, cols, settings: Det
     neighbourhood = ndimage.binary_dilation(neighbourhood, iterations=3)
     if (~valid[neighbourhood]).mean() > DATA_GAP_FRACTION:
         band.flags.append("near-data-gap")
+    if _ends_at_data_gap(valid, z, np.asarray(rows, float), np.asarray(cols, float), width_grid):
+        band.flags.append("ends-at-data-gap")
+
+
+def _ends_at_data_gap(valid: np.ndarray, z: np.ndarray, rows: np.ndarray, cols: np.ndarray, width_grid: float) -> bool:
+    """Whether the band, continued past either end, runs into missing data inside the soil.
+
+    Where grains inside a band rearrange faster than the photo rate, DIC
+    loses correlation exactly on the band, so a band can seem to stop at a
+    gap although it continues through it. Missing data above the soil
+    surface (air) or below the analysed region is not a gap: those are the
+    limits of the soil, where bands legitimately end.
+    """
+    top = np.where(valid, z, -np.inf).max(axis=0)
+    bottom = np.where(valid, z, np.inf).min(axis=0)
+    gaps = ~valid & (z < top[None, :]) & (z > bottom[None, :])
+    if not gaps.any() or len(rows) < 2:
+        return False
+    path = np.column_stack([rows, cols])
+    reach = END_GAP_WIDTHS * width_grid
+    steps = np.arange(1.0, reach + 1e-9, 0.5)
+    for end, inner in ((path[0], path[1:]), (path[-1], path[-2::-1])):
+        # Direction of the end over about one band width.
+        back = inner[np.linalg.norm(inner - end, axis=1) <= max(width_grid, 1.0)]
+        away = end - (back[-1] if len(back) else inner[0])
+        norm = np.linalg.norm(away)
+        if norm == 0:
+            continue
+        ahead = end[None, :] + np.outer(steps, away / norm)
+        r = np.round(ahead[:, 0]).astype(int)
+        c = np.round(ahead[:, 1]).astype(int)
+        inside = (r >= 0) & (r < gaps.shape[0]) & (c >= 0) & (c < gaps.shape[1])
+        if gaps[r[inside], c[inside]].any():
+            return True
+    return False
 
 
 def _wall_intercept(band: DetectedBand, from_start: bool, reach_mm: float) -> float | None:

@@ -31,8 +31,8 @@ CENTRELINE_TOL_MM = 3.0
 _COVERS = {
     "lift_off": {"lift-off-uncertain", "band-does-not-reach-toe", "low-contrast", "near-data-gap"},
     "shape": {"shape-ambiguous", "low-contrast"},
-    "length": {"not-reached-surface", "low-contrast", "near-data-gap"},
-    "area": {"not-reached-surface", "low-contrast", "near-data-gap"},
+    "length": {"not-reached-surface", "low-contrast", "near-data-gap", "ends-at-data-gap"},
+    "area": {"not-reached-surface", "low-contrast", "near-data-gap", "ends-at-data-gap"},
 }
 
 

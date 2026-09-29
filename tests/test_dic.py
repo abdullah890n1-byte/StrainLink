@@ -72,3 +72,17 @@ def test_incremental_tracking_large_motion(texture):
     assert np.max(np.abs(final_u - steps[-1])) < 0.05
     assert np.max(np.abs(final_v - 0.2 * steps[-1])) < 0.05
     assert len(set(result.reference_frames)) > 1
+
+
+def test_texture_from_photo_keeps_grey_levels_and_tiles_by_mirroring():
+    # A photo-like patch (band-limited, grey 70-190), smaller than the image, so it is tiled.
+    rng = np.random.default_rng(3)
+    from scipy import ndimage
+    patch = ndimage.gaussian_filter(rng.standard_normal((60, 90)), 1.5)
+    patch = 130 + 60 * patch / np.abs(patch).max()
+    photo_texture = SpeckleTexture.from_image(patch, (100, 150))
+    image = render(photo_texture, None, quantise=False)
+    # Undeformed rendering reproduces the photo (pixel integration blurs it only slightly).
+    assert np.abs(image[5:55, 5:85] - patch[5:55, 5:85]).mean() < 2.0
+    # Beyond the patch the texture continues as its mirror image.
+    assert np.abs(image[62:95, 5:85] - patch[57:24:-1, 5:85]).mean() < 2.0
