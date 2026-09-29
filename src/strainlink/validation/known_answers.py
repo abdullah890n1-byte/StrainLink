@@ -24,6 +24,8 @@ TOL_LIFT_OFF_DEG = 3.0
 TOL_LENGTH_MM = 20.0
 TOL_AREA_FRACTION = 0.05
 TOL_TIP_REACH_MM = 2.0
+# A lift-off with a stated uncertainty above this is flagged for review by the detector.
+LIFT_OFF_REVIEW_SIGMA_DEG = 1.5
 # Truth: band-1 counts as "appeared" once its developed length reaches this (as the detector's minimum length).
 ONSET_LENGTH_MM = 50.0
 # Band measurements are compared every this many mm of push.
@@ -42,6 +44,8 @@ class Check:
     tolerance: str
     ok: bool
     note: str = ""
+    # Outside tolerance, but StrainLink itself sent it for review (not a silent error).
+    flagged: bool = False
 
 
 def _finite(v) -> bool:
@@ -118,8 +122,14 @@ def compare(project_dir: str | Path) -> dict:
     surface_true = next((d for d, L in zip(true_push, truth["length_mm"]) if _finite(L)), None)
     if _finite(p.get("surface_reached_mm")) and surface_true is not None:
         err = p["surface_reached_mm"] - surface_true
-        checks.append(Check("Slip surface (band-1)", "Reaches the soil surface at", _fmt(p["surface_reached_mm"], 1, "mm"),
-                            _fmt(surface_true, 1, "mm"), f"{err:+.1f} mm", f"±1 photo ({step:.1f} mm)", abs(err) <= step + 0.01))
+        lo, hi = p.get("surface_reached_range_mm") or (p["surface_reached_mm"], p["surface_reached_mm"])
+        ranged = hi - lo > step + 0.01
+        found = _fmt(p["surface_reached_mm"], 1, "mm") + (f" (range {lo:.1f}–{hi:.1f})" if ranged else "")
+        inside = lo - step - 0.01 <= surface_true <= hi + step + 0.01
+        checks.append(Check("Slip surface (band-1)", "Reaches the soil surface at", found, _fmt(surface_true, 1, "mm"),
+                            f"{err:+.1f} mm" + (", inside range" if ranged and inside else ""),
+                            "±1 photo, or inside the reported range", abs(err) <= step + 0.01 or inside,
+                            "breakthrough not confirmed until the band is traced to the top of the data" if ranged else ""))
 
     found_by_push = {round(d, 3): i for i, d in enumerate(p["delta_mm"])}
     for k, d in enumerate(true_push):
@@ -130,19 +140,23 @@ def compare(project_dir: str | Path) -> dict:
             continue
         label = f"at {d:.0f} mm push"
         lift, lift_true = p["lift_off_deg"][i], truth["lift_off_span_deg"][k]
+        review = bool(p.get("needs_review", [False] * len(p["detected"]))[i])
         if _finite(lift) and _finite(lift_true):
-            checks.append(Check("Slip surface (band-1)", f"Lift-off angle {label}", f"{lift:.1f}° ± {p['lift_off_sigma_deg'][i]:.1f}°",
+            sigma = p["lift_off_sigma_deg"][i]
+            checks.append(Check("Slip surface (band-1)", f"Lift-off angle {label}", f"{lift:.1f}° ± {sigma:.1f}°",
                                 f"{lift_true:.1f}°", f"{lift - lift_true:+.1f}°", f"±{TOL_LIFT_OFF_DEG:.0f}°",
-                                abs(lift - lift_true) <= TOL_LIFT_OFF_DEG))
+                                abs(lift - lift_true) <= TOL_LIFT_OFF_DEG,
+                                flagged=_finite(sigma) and sigma > LIFT_OFF_REVIEW_SIGMA_DEG))
         length, length_true = p["length_mm"][i], truth["length_mm"][k]
         if _finite(length) and _finite(length_true):
             checks.append(Check("Slip surface (band-1)", f"Impacted length {label}", _fmt(length, 0, "mm"), _fmt(length_true, 0, "mm"),
-                                f"{length - length_true:+.0f} mm", f"±{TOL_LENGTH_MM:.0f} mm", abs(length - length_true) <= TOL_LENGTH_MM))
+                                f"{length - length_true:+.0f} mm", f"±{TOL_LENGTH_MM:.0f} mm", abs(length - length_true) <= TOL_LENGTH_MM,
+                                flagged=review))
         area, area_true = p["area_mm2"][i], truth["area_mm2"][k]
         if _finite(area) and _finite(area_true):
             checks.append(Check("Slip surface (band-1)", f"Wedge area {label}", f"{area / 1e4:.2f} ×10⁴ mm²", f"{area_true / 1e4:.2f} ×10⁴ mm²",
                                 f"{100 * (area - area_true) / area_true:+.1f}%", f"±{100 * TOL_AREA_FRACTION:.0f}%",
-                                abs(area - area_true) <= TOL_AREA_FRACTION * area_true))
+                                abs(area - area_true) <= TOL_AREA_FRACTION * area_true, flagged=review))
         shape, shape_true = p["shape"][i], truth["shape"][k]
         if shape:
             ambiguous = shape.endswith("?")
@@ -167,5 +181,8 @@ def compare(project_dir: str | Path) -> dict:
                             finding["strength"] in ("strong", "moderate"), finding["statement"]))
 
     # Plain Python types only: the result is sent to the app as JSON (numpy bools are not serialisable).
-    rows = [{**asdict(c), "ok": bool(c.ok)} for c in checks]
-    return {"preset": truth.get("preset"), "checks": rows, "passed": int(sum(r["ok"] for r in rows)), "total": len(rows)}
+    rows = [{**asdict(c), "ok": bool(c.ok), "flagged": bool(c.flagged and not c.ok)} for c in checks]
+    flagged = int(sum(r["flagged"] for r in rows))
+    passed = int(sum(r["ok"] for r in rows))
+    return {"preset": truth.get("preset"), "texture": truth.get("texture", "generated grains"), "checks": rows,
+            "passed": passed, "flagged": flagged, "silent": len(rows) - passed - flagged, "total": len(rows)}

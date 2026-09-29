@@ -32,7 +32,7 @@ from .calib import WallFrame
 from .dic import DICSettings, Grid, load_grayscale, track_sequence
 from .io.images import load_sequence
 from .io.sensors import Channel, SensorTable, load_sensors, read_table
-from .strain import compute_strain
+from .strain import compute_strain, fill_displacement_gaps
 
 Progress = Callable[[str, float, str], None]
 
@@ -163,9 +163,14 @@ def run(project_path: str | Path, progress: Progress | None = None) -> RunSummar
             per_frame.append(detect_bands(np.zeros(grid.shape), x_mm, z_mm, frame.wall_height_mm, det_settings))
             gamma[k] = 0.0
             continue
-        strain = compute_strain(ux, uz, spacing, -spacing, window)
+        # Points tracked before but lost now (correlation lost inside an active band)
+        # are refilled from their neighbours' displacement, so the band isn't cut there.
+        lost = (tracked.valid[1:k + 1].any(axis=0) & ~tracked.valid[k]).reshape(grid.shape)
+        ux_f, uz_f, refilled = fill_displacement_gaps(ux, uz, lost)
+        strain = compute_strain(ux_f, uz_f, spacing, -spacing, window)
         gamma[k] = strain.gamma_max
-        per_frame.append(detect_bands(strain.gamma_max, x_mm, z_mm, frame.wall_height_mm, det_settings, uz=uz))
+        per_frame.append(detect_bands(strain.gamma_max, x_mm, z_mm, frame.wall_height_mm, det_settings, uz=uz_f,
+                                      reconstructed=refilled))
 
     # 4. Sensors.
     report(STAGES[3], 0.0, "Reading the logger file")
@@ -346,7 +351,8 @@ def _mechanics_json(mech: mechanics.MechanicsResults) -> dict:
 def _history_json(history: TestBands) -> dict:
     p = history.primary
     primary = {k: v for k, v in asdict(p).items()}
-    primary.update(onset_mm=p.onset_mm, surface_reached_mm=p.surface_reached_mm)
+    primary.update(onset_mm=p.onset_mm, surface_reached_mm=p.surface_reached_mm,
+                   surface_reached_range_mm=list(p.surface_reached_range_mm))
     tracks = [{"name": t.name, "label": t.label, "onset_mm": t.onset_mm, "push_mm": t.delta_mm,
                "length_mm": [b.length_mm for b in t.bands], "width_mm": [b.width_mm for b in t.bands]}
               for t in history.tracks]

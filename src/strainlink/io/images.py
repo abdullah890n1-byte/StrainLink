@@ -1,9 +1,10 @@
 """Image sequence discovery and timestamps.
 
 Frames are sorted in natural order ("img2" before "img10"). Each frame
-gets a time from, in order of preference: the camera's EXIF capture time
-(with sub-seconds if present), a fixed interval given by the user, or the
-file modification time (least reliable; flagged). The source is always
+gets a time from, in order of preference: the video it was taken from
+(frames extracted by io/video.py), the camera's EXIF capture time (with
+sub-seconds if present), a fixed interval given by the user, or the file
+modification time (least reliable; flagged). The source is always
 reported, so the user knows how the frames were timed.
 """
 
@@ -18,8 +19,10 @@ from typing import Literal
 import numpy as np
 from PIL import ExifTags, Image
 
+from .video import read_frame_times
+
 IMAGE_SUFFIXES = {".tif", ".tiff", ".png", ".jpg", ".jpeg", ".bmp"}
-TimeSource = Literal["exif", "interval", "file-time", "index"]
+TimeSource = Literal["video", "exif", "interval", "file-time", "index"]
 _EXIF_TAGS = {v: k for k, v in ExifTags.TAGS.items()}
 
 
@@ -66,6 +69,10 @@ def load_sequence(folder: str | Path, interval_s: float | None = None) -> ImageS
     paths = list_images(folder)
     if not paths:
         raise FileNotFoundError(f"no images ({', '.join(sorted(IMAGE_SUFFIXES))}) in {folder}")
+    video_times = read_frame_times(folder)
+    if video_times is not None and all(p.name in video_times for p in paths):
+        times = np.array([video_times[p.name] for p in paths])
+        return ImageSequence(paths, times - times[0], "video")
     if interval_s is not None:
         return ImageSequence(paths, np.arange(len(paths)) * float(interval_s), "interval")
     stamps = [_exif_time(p) for p in paths]

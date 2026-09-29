@@ -45,6 +45,16 @@ DATA_GAP_FRACTION = 0.1
 # A band whose continuation past an end meets missing data inside the soil
 # within this many band widths is flagged: it may continue through the gap.
 END_GAP_WIDTHS = 1.5
+# A band whose centreline runs this much through refilled (lost-correlation)
+# points is flagged: its position and slip are sound, its width there is an upper bound.
+RECONSTRUCTED_FRACTION = 0.1
+# The top ~2 band widths below the surface cannot be fully resolved (strain
+# window and ridge filter reach past the data edge), so a tip there counts as
+# having reached the surface. It is *confirmed* only once the band is traced
+# to within this many band widths (at least SURFACE_CONFIRM_MIN_GRID grid
+# steps) of the top of the data; before that the reach is flagged.
+SURFACE_CONFIRM_WIDTHS = 0.5
+SURFACE_CONFIRM_MIN_GRID = 2.0
 # Lift-off uncertainty (1 sigma, degrees) above which the angle is flagged: at
 # 1.5 deg the 95% range reaches the +-3 deg accuracy tolerance.
 LIFT_OFF_SIGMA_LIMIT_DEG = 1.5
@@ -257,11 +267,14 @@ def detect_bands(
     wall_height_mm: float,
     settings: DetectionSettings | None = None,
     uz: np.ndarray | None = None,
+    reconstructed: np.ndarray | None = None,
 ) -> FrameBands:
     """Detect and measure shear bands in one max-shear-strain field.
 
     gamma, x, z (and optional vertical displacement uz, mm) are grids of the
     same shape; x, z are reference positions in the wall frame (mm).
+    reconstructed marks points whose displacement was refilled across lost
+    correlation (strain.fill_displacement_gaps); bands through them are flagged.
     """
     settings = settings or DetectionSettings()
     spacing = _grid_spacing(x, z)
@@ -317,7 +330,7 @@ def detect_bands(
             name="", label="", points=points, width_mm=width, width_profile_mm=width_profile,
             peak_gamma=peak, snr=peak / gamma_noise, reached_end=False,
         )
-        _band_flags(band, valid, z, rows, cols, settings, width / spacing)
+        _band_flags(band, valid, z, rows, cols, settings, width / spacing, reconstructed)
         bands.append(band)
 
     _label_bands(bands, wall_height_mm, settings.attach_tolerance_mm)
@@ -405,7 +418,7 @@ def _polyline_length(points: np.ndarray) -> float:
 
 
 def _band_flags(band: DetectedBand, valid: np.ndarray, z: np.ndarray, rows, cols, settings: DetectionSettings,
-                width_grid: float) -> None:
+                width_grid: float, reconstructed: np.ndarray | None = None) -> None:
     if band.snr < MIN_SNR:
         band.flags.append("low-contrast")
     if band.width_mm > WIDTH_LIMIT_FRACTION * settings.max_width_mm:
@@ -419,6 +432,8 @@ def _band_flags(band: DetectedBand, valid: np.ndarray, z: np.ndarray, rows, cols
         band.flags.append("near-data-gap")
     if _ends_at_data_gap(valid, z, np.asarray(rows, float), np.asarray(cols, float), width_grid):
         band.flags.append("ends-at-data-gap")
+    if reconstructed is not None and reconstructed[r, c].mean() > RECONSTRUCTED_FRACTION:
+        band.flags.append("through-lost-correlation")
 
 
 def _ends_at_data_gap(valid: np.ndarray, z: np.ndarray, rows: np.ndarray, cols: np.ndarray, width_grid: float) -> bool:
@@ -554,6 +569,9 @@ def _primary_metrics(band, x, z, uz, valid, height, z_top, spacing, settings) ->
     tip = band.points[-1]
     surface_tol = max(settings.attach_tolerance_mm, ATTACH_WIDTHS * band.width_mm)
     band.reached_end = bool(tip[1] >= z_top - surface_tol)
+    confirm_tol = max(SURFACE_CONFIRM_MIN_GRID * spacing, SURFACE_CONFIRM_WIDTHS * band.width_mm)
+    if band.reached_end and tip[1] < z_top - confirm_tol:
+        flags.append("surface-reach-unconfirmed")
     length = area = np.nan
     if band.reached_end:
         exit_x = _surface_intersection(band.points, height, END_FIT_WIDTHS * band.width_mm)

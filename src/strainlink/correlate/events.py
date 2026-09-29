@@ -70,8 +70,10 @@ def soil_events(history: TestBands) -> list[Event]:
         events.append(Event("band-1.onset", "Band-1 (primary slip surface) appears", "soil", primary.onset_mm, sigma, "band-1",
                             "the appearance of band-1 (the primary slip surface)"))
     if np.isfinite(primary.surface_reached_mm):
+        lo, hi = primary.surface_reached_range_mm
+        # An unconfirmed breakthrough is uncertain over its whole range.
         events.append(Event("band-1.surface", "Band-1 reaches the soil surface", "soil",
-                            primary.surface_reached_mm, sigma, "band-1", "band-1 reaching the soil surface"))
+                            primary.surface_reached_mm, max(sigma, (hi - lo) / 2), "band-1", "band-1 reaching the soil surface"))
     for t in history.tracks:
         if t.label in ("radial", "intermediate") and np.isfinite(t.onset_mm):
             kind = "radial band" if t.label == "radial" else "intermediate band"

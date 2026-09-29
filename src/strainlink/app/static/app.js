@@ -18,7 +18,7 @@ const BAND_NAMES = { primary: "Band-1 (primary slip surface)", radial: "Radial b
 const STAGES = ["Loading", "Measuring soil movement (DIC)", "Finding shear bands", "Reading sensors", "Synchronising clocks", "Engineering results", "Correlation engine", "Saving results"];
 
 const state = {
-  step: 0, photos: null, photosFolder: "", interval: null, sensors: null, sensorPath: "", calPath: "",
+  step: 0, photos: null, photosFolder: "", video: null, interval: null, sensors: null, sensorPath: "", calPath: "",
   channels: [], cal: { points: [], toe: null, tool: "scale" }, projectPath: "", results: null, frame: 0, playing: null, frameCache: {},
 };
 
@@ -68,7 +68,7 @@ async function openProject(path) {
 /* ---------------- wizard ---------------- */
 const STEP_COUNT = 4;
 function startWizard() {
-  Object.assign(state, { step: 0, photos: null, photosFolder: "", interval: null, sensors: null, sensorPath: "", calPath: "",
+  Object.assign(state, { step: 0, photos: null, photosFolder: "", video: null, interval: null, sensors: null, sensorPath: "", calPath: "",
     channels: [], cal: { points: [], toe: null, tool: "scale" }, testFolder: "" });
   $("#found").classList.add("hidden"); $("#dropzone").classList.remove("hidden", "compact");
   $("#proj-name").value = ""; $("#scale-direct").value = "";
@@ -122,7 +122,9 @@ async function scanFolder(folder) {
   }
   state.testFolder = r.folder;
   $("#found").classList.remove("hidden"); $("#dropzone").classList.add("compact");
-  if (r.photos) await inspectPhotos(r.photos); else markFound("photos", false, "no photos found — choose the photo folder");
+  if (r.video) await useVideo(r.video);
+  else if (r.photos) await inspectPhotos(r.photos);
+  else markFound("photos", false, "no photos or video found — choose the photo folder or the video");
   if (r.logger) await loadSensors(r.logger); else markFound("logger", false, "not found — choose the logger export");
   setCalibration(r.calibration);
   updateNav();
@@ -139,16 +141,31 @@ function setCalibration(path) {
 }
 $$("[data-change]").forEach((b) => b.onclick = async () => {
   const kind = b.dataset.change;
-  if (kind === "photos") { const f = await api().choose("folder", state.testFolder); if (f) await inspectPhotos(f); }
+  if (kind === "photos") { const f = await api().choose("folder", state.testFolder); if (f) { state.video = null; $("#video-box").classList.add("hidden"); await inspectPhotos(f); } }
+  if (kind === "video") { const f = await api().choose("video", state.testFolder); if (f) await useVideo(f); }
   if (kind === "logger") { const f = await api().choose("sensor", state.testFolder); if (f) await loadSensors(f); }
   if (kind === "cal") { const f = await api().choose("calibration", state.testFolder); if (f) setCalibration(f); }
   updateNav();
 });
+// A video is turned into a folder of timed frames once; after that it is handled like photos.
+async function useVideo(path, everyS = null) {
+  markFound("photos", true, `Reading the video ${path.split("/").pop()}…`);
+  const r = await api().extract_video(path, everyS);
+  if (!r.ok) { markFound("photos", false, r.error); return; }
+  state.video = { path, every_s: r.every_s, name: r.name };
+  await inspectPhotos(r.folder);
+  markFound("photos", true, `${r.count} frames from ${r.name} (${fmt(r.duration_s / 60, 1)} min at ${fmt(r.fps, 0)} fps) · ${state.photos.width} × ${state.photos.height} px`);
+  $("#video-every").value = +r.every_s.toPrecision(3);
+  $("#video-note").textContent = `automatic: every ${+r.default_every_s.toPrecision(3)} s`;
+  $("#video-box").classList.remove("hidden");
+  $("#cap-first").textContent = "First frame"; $("#cap-last").textContent = "Last frame";
+}
+$("#video-every").onchange = () => { const v = +$("#video-every").value; if (state.video && v > 0) useVideo(state.video.path, v); };
 async function inspectPhotos(folder) {
   const r = await api().inspect_photos(folder, state.interval);
   if (!r.ok) { markFound("photos", false, r.error); return; }
   state.photos = r; state.photosFolder = folder; state.cal = { points: [], toe: null, tool: "scale" };
-  const timed = { exif: "timed by the camera", interval: `one every ${state.interval} s`, "file-time": "no camera time stamps", index: "no time information" }[r.time_source];
+  const timed = { video: "timed by the video", exif: "timed by the camera", interval: `one every ${state.interval} s`, "file-time": "no camera time stamps", index: "no time information" }[r.time_source];
   markFound("photos", true, `${r.count} photos · ${r.width} × ${r.height} px · ${timed}`);
   $("#thumb-first").src = r.first; $("#thumb-last").src = r.last;
   $("#cap-first").textContent = `First photo (${r.first_name})`; $("#cap-last").textContent = `Last photo (${r.last_name})`;
@@ -306,7 +323,8 @@ function buildProject() {
   const cellDepths = {}; $$("#cells-body input").forEach((i) => { if (i.value) cellDepths[i.dataset.name] = +i.value; });
   const project = {
     name: $("#proj-name").value || "Untitled test",
-    images: { folder: state.photosFolder, ...(state.interval ? { interval_s: state.interval } : {}) },
+    images: { folder: state.photosFolder, ...(state.interval ? { interval_s: state.interval } : {}),
+              ...(state.video ? { video: state.video.path, video_every_s: state.video.every_s } : {}) },
     sensors: { file: state.sensorPath, ...(state.calPath ? { calibration_file: state.calPath } : {}),
       channels: state.channels.map((c) => ({ column: c.column, role: c.role, unit: c.unit, factor: FACTORS[c.unit] || 1, name: c.name, confidence: 1 })) },
     calibration: { mm_per_px: mmpp, toe_px: [state.cal.toe[0] / s, state.cal.toe[1] / s], wall_height_mm: +$("#wall-h").value },
@@ -365,11 +383,16 @@ function runProgress(title, onDone) {
   }, 500);
 }
 
+// Wall push at which band-1 broke through, with its range when the breakthrough isn't confirmed.
+function surfaceRange(p) {
+  const r = p.surface_reached_range_mm;
+  return r && r[1] - r[0] > 1.01 ? `range ${fmt(r[0], 1)}–${fmt(r[1], 1)} mm (not yet confirmed)` : "wall push";
+}
 /* ---------------- results ---------------- */
 async function openResults(path) {
   const r = await api().results(path);
   if (!r.ok) return toast(r.error);
-  state.projectPath = path; state.results = r; state.frameCache = {}; state.frame = 0;
+  stopPlay(); state.projectPath = path; state.results = r; state.frameCache = {}; state.frameQueue = null; state.frame = 0;
   const s = r.summary;
   show("results", s.project);
   $("#res-title").textContent = s.project;
@@ -390,7 +413,7 @@ function renderCards(s) {
     ["Push at peak δp", fmt(m.passive.push_at_peak_mm, 1, "mm"), `${m.passive.plateau ? "plateau · " : ""}range ${fmt(m.passive.push_range_mm[0], 1)}–${fmt(m.passive.push_range_mm[1], 1)} mm`, m.passive.plateau ? "The force plateaus, so the peak position is spread over a range." : ""],
     ["Kp", fmt(m.kp, 2), `± ${fmt(m.kp_sigma, 3)}`],
     ["Band-1 appears at", fmt(p.onset_mm, 1, "mm"), "wall push"],
-    ["Band-1 reaches surface", fmt(p.surface_reached_mm, 1, "mm"), "wall push"],
+    ["Band-1 reaches surface", fmt(p.surface_reached_mm, 1, "mm"), surfaceRange(p)],
     ["Lift-off angle", fmt(lastValue(p.lift_off_deg), 1, "°"), `± ${fmt(lastValue(p.lift_off_sigma_deg), 1)}° · end of test`],
     ["Impacted length", fmt(lastValue(p.length_mm), 0, "mm"), "end of test"],
     ["Wedge area", fmt((lastValue(p.area_mm2) || NaN) / 1e4, 2, "×10⁴ mm²"), "end of test"],
@@ -423,12 +446,16 @@ async function renderAccuracy(path) {
   $("#tab-accuracy").classList.toggle("hidden", !r.ok);
   if (!r.ok) return;
   const all = r.passed === r.total;
-  $("#acc-banner").className = `acc-banner ${all ? "good" : "warn"}`;
-  $("#acc-banner").innerHTML = `<b>${r.passed} of ${r.total}</b> checks within tolerance${all ? " — every automatic result matches the known answer." : " — see the ✗ rows below."}`;
+  $("#acc-banner").className = `acc-banner ${all ? "good" : r.silent ? "warn" : "flag"}`;
+  const parts = [];
+  if (r.flagged) parts.push(`${r.flagged} outside but flagged for your review (⚑)`);
+  if (r.silent) parts.push(`${r.silent} silent error${r.silent > 1 ? "s" : ""} (✗: outside tolerance and not flagged)`);
+  $("#acc-banner").innerHTML = `<b>${r.passed} of ${r.total}</b> checks within tolerance`
+    + (all ? " — every automatic result matches the known answer." : ` · ${parts.join(" · ")}`);
   const groups = [...new Set(r.checks.map((c) => c.group))];
   $("#acc-table").innerHTML = groups.map((g) => {
-    const rows = r.checks.filter((c) => c.group === g).map((c) => `<tr class="${c.ok ? "" : "bad"}">
-      <td class="mark">${c.ok ? "✓" : "✗"}</td><td>${esc(c.item)}${c.note ? `<div class="muted small">${esc(c.note)}</div>` : ""}</td>
+    const rows = r.checks.filter((c) => c.group === g).map((c) => `<tr class="${c.ok ? "" : c.flagged ? "flagged" : "bad"}">
+      <td class="mark" title="${c.ok ? "within tolerance" : c.flagged ? "outside tolerance, flagged for review" : "outside tolerance, not flagged"}">${c.ok ? "✓" : c.flagged ? "⚑" : "✗"}</td><td>${esc(c.item)}${c.note ? `<div class="muted small">${esc(c.note)}</div>` : ""}</td>
       <td>${esc(c.found)}</td><td>${esc(c.true)}</td><td>${esc(c.error)}</td><td class="muted">${esc(c.tolerance)}</td></tr>`).join("");
     const ok = r.checks.filter((c) => c.group === g && c.ok).length, n = r.checks.filter((c) => c.group === g).length;
     return `<h3>${esc(g)} <span class="muted small">${ok}/${n}</span></h3><table class="acc"><thead><tr><th></th><th>What</th><th>StrainLink found</th><th>True answer</th><th>Error</th><th>Tolerance</th></tr></thead><tbody>${rows}</tbody></table>`;
@@ -497,12 +524,28 @@ function drawBandPlots() {
   mk("plot-lift", p.lift_off_deg, "Lift-off angle (°)", p.lift_off_sigma_deg);
   mk("plot-area", p.area_mm2.map((v) => (v === null ? null : v / 1e4)), "Wedge area (×10⁴ mm²)");
 }
+// Photos are fetched through one queue: requests never overlap (they used to
+// pile up during playback and freeze the viewer), and a failed request is
+// dropped from the cache so it can be retried.
+function fetchFrame(k, showStrain) {
+  const key = `${k}:${showStrain}`;
+  if (!state.frameCache[key]) {
+    const request = (state.frameQueue || Promise.resolve()).catch(() => {}).then(() => api().frame(state.projectPath, k, showStrain));
+    state.frameQueue = request;
+    state.frameCache[key] = request.catch((e) => { delete state.frameCache[key]; throw e; });
+  }
+  return state.frameCache[key];
+}
 async function showFrame(k) {
   state.frame = k; $("#scrub-soil").value = k; $("#scrub-overview").value = k;
-  const showStrain = $("#show-strain").checked; const key = `${k}:${showStrain}`;
+  const showStrain = $("#show-strain").checked;
   $("#frame-loading").classList.remove("hidden");
-  const f = state.frameCache[key] || (state.frameCache[key] = await api().frame(state.projectPath, k, showStrain));
-  if (state.frame !== k) return;
+  let f;
+  try { f = await fetchFrame(k, showStrain); } catch (e) {
+    if (state.frame === k) { $("#frame-loading").classList.add("hidden"); stopPlay(); toast(`Could not show photo ${k + 1}. Try again.`); }
+    return false;
+  }
+  if (state.frame !== k) return false;
   $("#frame-loading").classList.add("hidden");
   $("#frame-img").src = f.image;
   const svg = $("#frame-svg"); svg.setAttribute("viewBox", `0 0 ${f.width} ${f.height}`); svg.setAttribute("preserveAspectRatio", "none");
@@ -525,18 +568,32 @@ async function showFrame(k) {
   $("#legend").innerHTML = (labels.length ? labels : ["primary"]).map((l) => `<div><i style="background:${css(BAND_COLOURS[l])}"></i>${BAND_NAMES[l]}</div>`).join("")
     + (showStrain ? `<div>Strain overlay: red = high shear strain (up to ${fmt(f.gamma_max, 2)})</div>` : "");
   drawBandPlots();
+  return true;
 }
 $("#scrub-soil").oninput = (e) => showFrame(+e.target.value);
 $("#show-strain").onchange = () => showFrame(state.frame);
-function stopPlay() { if (state.playing) { clearInterval(state.playing); state.playing = null; $("#play").textContent = "▶"; } }
-$("#play").onclick = () => {
+// Playback shows each photo for at least PLAY_STEP_MS, waiting for it to
+// arrive, and pre-loads the next one meanwhile. Dragging the slider while
+// playing continues from the new position.
+const PLAY_STEP_MS = 400;
+function stopPlay() { state.playing = null; $("#play").textContent = "▶"; }
+$("#play").onclick = async () => {
   if (state.playing) return stopPlay();
+  const run = {}; state.playing = run;
   $("#play").textContent = "❚❚";
-  if (state.frame >= state.results.summary.frames - 1) state.frame = -1;
-  state.playing = setInterval(() => {
-    if (state.frame >= state.results.summary.frames - 1) return stopPlay();
-    showFrame(state.frame + 1);
-  }, 450);
+  const last = state.results.summary.frames - 1;
+  if (state.frame >= last) await showFrame(0);
+  while (state.playing === run && state.frame < last) {
+    const next = state.frame + 1, showStrain = $("#show-strain").checked;
+    const started = performance.now();
+    const showing = showFrame(next);   // queued first, so it is not delayed by the pre-load
+    if (next + 1 <= last) fetchFrame(next + 1, showStrain).catch(() => {});
+    const shown = await showing;
+    if (state.playing !== run) return;
+    if (!shown && state.frame === next) return stopPlay();
+    await new Promise((r) => setTimeout(r, Math.max(0, PLAY_STEP_MS - (performance.now() - started))));
+  }
+  if (state.playing === run) stopPlay();
 };
 $("#btn-report").onclick = async () => { const r = await api().open_report(state.projectPath); if (!r.ok) toast(r.error); };
 $("#btn-finder").onclick = () => api().reveal(state.projectPath);

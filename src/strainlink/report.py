@@ -31,6 +31,13 @@ STRENGTH_COLOURS = {"strong": "#2b8a3e", "moderate": "#1971c2", "weak": "#868e96
 FIG_DPI = 110
 
 
+
+def _surface_range(p: dict) -> str:
+    lo, hi = p.get("surface_reached_range_mm") or (None, None)
+    if lo is None or hi is None or not (hi - lo > 1.01):
+        return "wall push"
+    return f"range {lo:.1f}–{hi:.1f} mm (not yet confirmed)"
+
 def _png(fig) -> str:
     buffer = io.BytesIO()
     fig.savefig(buffer, format="png", dpi=FIG_DPI, bbox_inches="tight")
@@ -155,7 +162,7 @@ def build(results_dir: str | Path) -> Path:
          ("plateau " if m["passive"]["plateau"] else "") + f"range {_num(m['passive']['push_range_mm'][0], 1)}–{_num(m['passive']['push_range_mm'][1], 1)} mm"),
         ("Kp", _num(m["kp"], 2), f"± {_num(m['kp_sigma'], 3)}"),
         ("Band-1 appears at", _num(p["onset_mm"], 1, "mm"), "wall push"),
-        ("Band-1 reaches surface at", _num(p["surface_reached_mm"], 1, "mm"), "wall push"),
+        ("Band-1 reaches surface at", _num(p["surface_reached_mm"], 1, "mm"), _surface_range(p)),
         ("Lift-off angle (end)", _num(last("lift_off_deg"), 1, "°"), f"± {_num(last('lift_off_sigma_deg'), 1)}°"),
         ("Impacted length (end)", _num(last("length_mm"), 0, "mm"), ""),
         ("Wedge area (end)", _num((last("area_mm2") or float('nan')) / 1e4, 2, "×10⁴ mm²"), ""),

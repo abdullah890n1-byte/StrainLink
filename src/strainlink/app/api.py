@@ -19,13 +19,15 @@ from pathlib import Path
 
 import numpy as np
 from PIL import Image
-from scipy.interpolate import griddata
+from scipy import ndimage
 
 from .. import __version__, pipeline, report
 from ..calib import WallFrame
 from ..dic import load_grayscale
+from ..bands.ridges import fill_missing
 from ..io.images import load_sequence
 from ..io.sensors import load_sensors
+from ..io import video as video_io
 from ..synth.demo import DemoSpec, make_demo
 
 APP_DIR = Path.home() / "Library" / "Application Support" / "StrainLink"
@@ -41,6 +43,11 @@ MAX_RECENT = 8
 PREVIEW_WIDTH = 900
 # Strain overlay colour map endpoints (transparent -> strong magenta-red).
 OVERLAY_ALPHA = 0.75
+# Fixed-point iterations to find where a displayed pixel was in the first
+# photo (X = x - u(X)); the displacement varies slowly enough that a few suffice.
+INVERSE_MAP_ITERATIONS = 4
+# The overlay is computed every this many display pixels and then upsampled.
+OVERLAY_STEP_PX = 2
 
 
 def _png_data_url(array: np.ndarray) -> str:
@@ -62,12 +69,73 @@ def _downscale(image: np.ndarray) -> tuple[np.ndarray, float]:
     return np.asarray(Image.fromarray(image).resize(size, Image.LANCZOS)), scale
 
 
+class _Analysis:
+    """Everything the photo viewer needs from one analysis, loaded once."""
+
+    def __init__(self, project_path: str, fields, bands: list, photo_paths: list, wall: WallFrame):
+        self.project_path = project_path
+        self.wall = wall
+        self.bands = bands
+        self.photo_paths = photo_paths
+        x, z = fields["x_mm"], fields["z_mm"]
+        # The DIC grid is regular in the first photo: index = (position - origin) / step.
+        self.x0, self.dx = float(x[0, 0]), float(x[0, 1] - x[0, 0])
+        self.z0, self.dz = float(z[0, 0]), float(z[1, 0] - z[0, 0])
+        self.ux, self.uz, self.gamma = fields["ux"], fields["uz"], fields["gamma"]
+        self.push_mm = fields["push_mm"]
+        last = self.gamma[-1]
+        self.gamma_scale = float(np.nanpercentile(last, 99)) if np.isfinite(last).any() else 1.0
+
+    @classmethod
+    def load(cls, project_path: str) -> "_Analysis":
+        project = pipeline.load_project(project_path)
+        folder = Path(project_path).parent
+        with np.load(folder / "results" / "fields.npz") as npz:
+            fields = {name: npz[name] for name in npz.files}
+        bands = json.loads((folder / "results" / "bands.json").read_text())
+        cal = project["calibration"]
+        wall = WallFrame(float(cal["mm_per_px"]), float(cal["toe_px"][0]), float(cal["toe_px"][1]),
+                         float(cal["wall_height_mm"]))
+        seq = load_sequence(folder / project["images"].get("folder", "images"), project["images"].get("interval_s"))
+        return cls(project_path, fields, bands, list(seq.paths), wall)
+
+    def _index(self, x, z) -> np.ndarray:
+        return np.stack([(np.ravel(z) - self.z0) / self.dz, (np.ravel(x) - self.x0) / self.dx])
+
+    def displacement_at(self, k: int, x, z) -> tuple[np.ndarray, np.ndarray]:
+        """Displacement (mm) of photo k at reference positions (mm); gaps filled from neighbours."""
+        idx = self._index(x, z)
+        ux = ndimage.map_coordinates(fill_missing(self.ux[k]), idx, order=1, mode="nearest")
+        uz = ndimage.map_coordinates(fill_missing(self.uz[k]), idx, order=1, mode="nearest")
+        return ux.reshape(np.shape(x)), uz.reshape(np.shape(x))
+
+    def overlay_level(self, k: int, shape: tuple[int, int], scale: float) -> np.ndarray:
+        """Strain level 0..1 at every display pixel of photo k (soil drawn where it is now)."""
+        rows, cols = np.mgrid[0:shape[0]:OVERLAY_STEP_PX, 0:shape[1]:OVERLAY_STEP_PX].astype(float)
+        x_now, z_now = self.wall.to_wall(cols / scale, rows / scale)
+        ux, uz = fill_missing(self.ux[k]), fill_missing(self.uz[k])
+        x_ref, z_ref = x_now, z_now
+        for _ in range(INVERSE_MAP_ITERATIONS):
+            idx = self._index(x_ref, z_ref)
+            x_ref = x_now - ndimage.map_coordinates(ux, idx, order=1, mode="nearest").reshape(x_now.shape)
+            z_ref = z_now - ndimage.map_coordinates(uz, idx, order=1, mode="nearest").reshape(x_now.shape)
+        idx = self._index(x_ref, z_ref)
+        gamma = self.gamma[k]
+        measured = ndimage.map_coordinates(np.isfinite(gamma).astype(float), idx, order=0, mode="constant", cval=0.0)
+        values = ndimage.map_coordinates(np.nan_to_num(gamma), idx, order=1, mode="constant", cval=0.0)
+        level = np.where(measured > 0.5, np.clip(values / max(self.gamma_scale, 1e-9), 0, 1), 0.0).reshape(x_now.shape)
+        full = np.repeat(np.repeat(level, OVERLAY_STEP_PX, axis=0), OVERLAY_STEP_PX, axis=1)[:shape[0], :shape[1]]
+        return np.clip(ndimage.uniform_filter(full, OVERLAY_STEP_PX), 0.0, 1.0)
+
+
 class Api:
     def __init__(self):
         self._window = None
         self._job: dict = {"running": False, "stage": "", "fraction": 0.0, "message": "", "error": None, "result": None}
         self._lock = threading.Lock()
         self._frame_cache: dict = {}
+        self._frame_lock = threading.Lock()
+        self._viewed: _Analysis | None = None
         APP_DIR.mkdir(parents=True, exist_ok=True)
 
     def attach(self, window) -> None:
@@ -103,14 +171,32 @@ class Api:
     def scan_test_folder(self, folder: str) -> dict:
         """Find the photos, the logger export and the calibration run inside a test folder."""
         root = Path(folder)
+        if root.is_file() and video_io.is_video(root):
+            return {"ok": True, "folder": str(root.parent), "photos": None, "photo_count": 0, "video": str(root),
+                    **self._scan_logger(root.parent)}
         if not root.is_dir():
-            return {"ok": False, "error": "That is not a folder."}
+            return {"ok": False, "error": "That is not a folder or a video."}
         from ..io.images import IMAGE_SUFFIXES
         candidates = [root] + [p for p in root.rglob("*") if p.is_dir() and len(p.relative_to(root).parts) <= SCAN_DEPTH
                                and not p.name.startswith(".") and p.name != "results"]
         counts = {d: sum(1 for f in d.iterdir() if f.suffix.lower() in IMAGE_SUFFIXES and not f.name.startswith("."))
                   for d in candidates}
         photos = max(counts, key=counts.get) if counts and max(counts.values()) >= 2 else None
+        # A video (the largest, if several) is used unless the photos are a real photo folder:
+        # frames StrainLink extracted earlier from that video don't count as photos.
+        videos = [f for d in candidates for f in d.iterdir() if f.is_file() and video_io.is_video(f)]
+        video = max(videos, key=lambda f: f.stat().st_size) if videos else None
+        if photos and video_io.read_frame_times(photos) is not None:
+            photos = None
+        project = next((p for p in (root / "project.json", root / "StrainLink analysis" / "project.json") if p.exists()), None)
+        return {"ok": True, "folder": str(root), "photos": str(photos) if photos else None,
+                "photo_count": counts.get(photos, 0) if photos else 0, "video": str(video) if video and not photos else None,
+                "project": str(project) if project else None, **self._scan_logger(root, candidates)}
+
+    def _scan_logger(self, root: Path, candidates: list | None = None) -> dict:
+        """The logger export and the calibration run among the test's files."""
+        candidates = candidates or [root] + [p for p in root.rglob("*") if p.is_dir() and not p.name.startswith(".")
+                                             and len(p.relative_to(root).parts) <= SCAN_DEPTH and p.name != "results"]
         files = [f for d in candidates for f in d.iterdir()
                  if f.is_file() and f.suffix.lower() in SENSOR_SUFFIXES and not f.name.startswith(".")]
         calibration = next((f for f in files if any(w in f.name.lower() for w in CALIBRATION_WORDS)), None)
@@ -126,19 +212,26 @@ class Api:
             score = sum(r in roles for r in ("time", "force", "displacement")) + 0.1 * len(table.channels)
             if score > best:
                 logger, best = f, score
-        project = next((p for p in (root / "project.json", root / "StrainLink analysis" / "project.json") if p.exists()), None)
-        return {"ok": True, "folder": str(root), "photos": str(photos) if photos else None,
-                "photo_count": counts.get(photos, 0) if photos else 0,
-                "logger": str(logger) if logger else None, "calibration": str(calibration) if calibration else None,
-                "project": str(project) if project else None}
+        return {"logger": str(logger) if logger else None, "calibration": str(calibration) if calibration else None}
+
+    def extract_video(self, path: str, every_s: float | None = None) -> dict:
+        """Frames of a test video at the given spacing (default: automatic), ready to analyse like photos."""
+        try:
+            folder, info, spacing = video_io.extract(path, every_s)
+        except (OSError, ValueError) as error:
+            return {"ok": False, "error": str(error)}
+        return {"ok": True, "folder": str(folder), "every_s": spacing, "fps": info.fps, "duration_s": info.duration_s,
+                "default_every_s": video_io.default_spacing_s(info), "name": Path(path).name,
+                "count": len(list(folder.glob("frame_*.png")))}
 
     def choose(self, kind: str, start: str = "") -> str | None:
-        """Native dialog. kind: folder | sensor | calibration | project | save-project."""
+        """Native dialog. kind: folder | sensor | calibration | project | video | save-project."""
         import webview
         types = {
             "sensor": ("Logger exports (*.csv;*.txt;*.tsv;*.xlsx;*.xls)", "All files (*.*)"),
             "calibration": ("Calibration run (*.csv;*.txt;*.xlsx)", "All files (*.*)"),
             "project": ("StrainLink project (*.json)",),
+            "video": ("Videos (*.mp4;*.mov;*.m4v;*.avi;*.mkv;*.mts;*.wmv)", "All files (*.*)"),
         }
         if kind == "folder":
             result = self._window.create_file_dialog(webview.FOLDER_DIALOG, directory=start or str(Path.home()))
@@ -227,8 +320,12 @@ class Api:
         with self._lock:
             self._job.update(stage=stage, fraction=float(fraction), message=message)
 
-    def run_analysis(self, project_path: str) -> dict:
+    def _forget_views(self) -> None:
         self._frame_cache.clear()
+        self._viewed = None
+
+    def run_analysis(self, project_path: str) -> dict:
+        self._forget_views()
         return self._start(self._run, project_path)
 
     def _run(self, project_path: str) -> dict:
@@ -238,7 +335,7 @@ class Api:
         return {"project": project_path}
 
     def start_demo(self, preset: str) -> dict:
-        self._frame_cache.clear()
+        self._forget_views()
         return self._start(self._demo, preset)
 
     def _demo(self, preset: str) -> dict:
@@ -270,47 +367,45 @@ class Api:
         key = (project_path, int(k), bool(show_strain))
         if key in self._frame_cache:
             return self._frame_cache[key]
-        project = pipeline.load_project(project_path)
-        folder = Path(project_path).parent
-        fields = np.load(folder / "results" / "fields.npz")
-        bands = json.loads((folder / "results" / "bands.json").read_text())[int(k)]
-        cal = project["calibration"]
-        frame = WallFrame(float(cal["mm_per_px"]), float(cal["toe_px"][0]), float(cal["toe_px"][1]),
-                          float(cal["wall_height_mm"]))
-        seq = load_sequence(folder / project["images"].get("folder", "images"), project["images"].get("interval_s"))
-        photo = _to_8bit(load_grayscale(seq.paths[int(k)]))
+        # One frame at a time: overlapping requests (fast scrubbing, playback)
+        # would otherwise compete for the CPU and all arrive late.
+        with self._frame_lock:
+            if key in self._frame_cache:
+                return self._frame_cache[key]
+            result = self._render_frame(self._analysis(project_path), int(k), bool(show_strain))
+            self._frame_cache[key] = result
+            return result
+
+    def _analysis(self, project_path: str) -> _Analysis:
+        """Results of one analysis, loaded once and kept while it is being viewed."""
+        if self._viewed is None or self._viewed.project_path != project_path:
+            self._viewed = _Analysis.load(project_path)
+        return self._viewed
+
+    @staticmethod
+    def _render_frame(a: "_Analysis", k: int, show_strain: bool) -> dict:
+        photo = _to_8bit(load_grayscale(a.photo_paths[k]))
         display, scale = _downscale(photo)
         rgb = np.repeat(display[..., None], 3, axis=2).astype(float)
-
-        x, z = fields["x_mm"], fields["z_mm"]
-        ux, uz, gamma = fields["ux"][k], fields["uz"][k], fields["gamma"][k]
-        cur_col, cur_row = frame.to_image(x + np.nan_to_num(ux), z + np.nan_to_num(uz))
-        gmax = float(np.nanpercentile(fields["gamma"][-1], 99)) if np.isfinite(fields["gamma"][-1]).any() else 1.0
+        ux, uz, gamma = a.ux[k], a.uz[k], a.gamma[k]
         if show_strain and np.isfinite(gamma).any():
-            ok = np.isfinite(gamma) & np.isfinite(ux)
-            rows, cols = np.mgrid[0:display.shape[0], 0:display.shape[1]]
-            grid_g = griddata((cur_row[ok] * scale, cur_col[ok] * scale), gamma[ok], (rows, cols), method="linear")
-            level = np.clip(np.nan_to_num(grid_g / max(gmax, 1e-9)), 0, 1)
+            level = a.overlay_level(k, display.shape, scale)
             colour = np.stack([235 * np.ones_like(level), 60 + 80 * (1 - level), 40 + 60 * (1 - level)], axis=-1)
             alpha = (OVERLAY_ALPHA * level ** 0.8)[..., None]
             rgb = rgb * (1 - alpha) + colour * alpha
         # Bands: reference positions (mm) -> current positions -> display pixels.
         disp_bands = []
-        valid_pts = np.isfinite(ux) & np.isfinite(uz)
-        for b in bands:
+        for b in a.bands[k]:
             pts = np.array(b["points"], dtype=float)
             if len(pts) < 2:
                 continue
-            bux = griddata((x[valid_pts], z[valid_pts]), ux[valid_pts], pts, method="linear")
-            buz = griddata((x[valid_pts], z[valid_pts]), uz[valid_pts], pts, method="linear")
-            col, row = frame.to_image(pts[:, 0] + np.nan_to_num(bux), pts[:, 1] + np.nan_to_num(buz))
+            bux, buz = a.displacement_at(k, pts[:, 0], pts[:, 1])
+            col, row = a.wall.to_image(pts[:, 0] + bux, pts[:, 1] + buz)
             disp_bands.append({"name": b["name"], "label": b["label"], "width_mm": b["width_mm"], "flags": b["flags"],
                                "points": np.column_stack([col * scale, row * scale]).round(1).tolist()})
-        result = {"image": _png_data_url(np.clip(rgb, 0, 255).astype(np.uint8)), "width": display.shape[1],
-                  "height": display.shape[0], "bands": disp_bands, "push_mm": float(fields["push_mm"][k]),
-                  "gamma_max": gmax}
-        self._frame_cache[key] = result
-        return result
+        return {"image": _png_data_url(np.clip(rgb, 0, 255).astype(np.uint8)), "width": display.shape[1],
+                "height": display.shape[0], "bands": disp_bands, "push_mm": float(a.push_mm[k]),
+                "gamma_max": a.gamma_scale}
 
     def accuracy(self, project_path: str) -> dict:
         """Known-answer comparison for synthetic tests (those with a truth.json)."""
