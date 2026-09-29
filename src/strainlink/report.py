@@ -32,6 +32,38 @@ FIG_DPI = 110
 
 
 
+
+# Page style shared by every StrainLink report.
+STYLE = f""":root{{--ink:{INK};--muted:{MUTED};--accent:{ACCENT};--line:#e6e8ef;--bg:#ffffff;--soft:#f6f7fb}}
+*{{box-sizing:border-box}} body{{margin:0;background:var(--bg);color:var(--ink);font:14px/1.5 -apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI",Roboto,sans-serif}}
+main{{max-width:1040px;margin:0 auto;padding:32px 28px 64px}}
+h1{{font-size:24px;margin:0 0 4px}} h2{{font-size:17px;margin:34px 0 12px;padding-bottom:6px;border-bottom:1px solid var(--line)}}
+.meta{{color:var(--muted);font-size:12.5px}} .synthetic{{margin:14px 0;padding:10px 14px;border-radius:10px;background:#fff4e6;color:#a44a00;font-weight:600;font-size:13px}}
+.cards{{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:10px}}
+.card{{background:var(--soft);border-radius:12px;padding:12px 14px}} .card .k{{color:var(--muted);font-size:12px}} .card .v{{font-size:20px;font-weight:650;margin-top:2px}} .card .s{{color:var(--muted);font-size:11.5px}}
+ul.flags li{{margin:4px 0}} .finding{{border:1px solid var(--line);border-radius:12px;padding:12px 14px;margin:10px 0}}
+.badge{{display:inline-block;color:#fff;font-size:11px;font-weight:650;border-radius:20px;padding:1px 9px;text-transform:uppercase;letter-spacing:.03em}}
+.ft{{margin:6px 0 2px;font-size:14.5px}} details summary{{cursor:pointer;color:var(--accent);font-size:12.5px}} .method{{color:var(--muted);font-size:12.5px}}
+table{{border-collapse:collapse;font-size:12.5px;margin:6px 0}} td{{padding:3px 12px 3px 0;border-bottom:1px solid var(--line)}} .caveats{{color:#a44a00;font-size:12.5px}}
+img{{max-width:100%}} .grid{{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:14px}} figure{{margin:0}} figcaption{{color:var(--muted);font-size:12px;text-align:center}}
+.foot{{margin-top:40px;color:var(--muted);font-size:12px}} @media print{{main{{padding:0}} details{{display:block}} details>summary{{display:none}}}}
+"""
+
+
+def findings_section(findings: list[dict]) -> str:
+    """The graded findings with their evidence, as HTML."""
+    out = ""
+    for f in findings:
+        colour = STRENGTH_COLOURS[f["strength"]]
+        evidence = "".join(f"<tr><td>{html.escape(str(k))}</td><td>{html.escape(str(v))}</td></tr>" for k, v in f["evidence"].items())
+        caveats = "".join(f"<li>{html.escape(c)}</li>" for c in f["caveats"])
+        out += (f'<div class="finding"><span class="badge" style="background:{colour}">{html.escape(f["strength"])}</span>'
+                f'<div class="ft">{html.escape(f["statement"])}</div>'
+                f'<details><summary>Evidence and method</summary><p class="method">{html.escape(f["method"])}</p>'
+                f'<table>{evidence}</table><ul class="caveats">{caveats}</ul></details></div>')
+    return out or '<p class="meta">No findings could be computed for this test.</p>'
+
+
 def _surface_range(p: dict) -> str:
     lo, hi = p.get("surface_reached_range_mm") or (None, None)
     if lo is None or hi is None or not (hi - lo > 1.01):
@@ -151,6 +183,9 @@ def build(results_dir: str | Path) -> Path:
     """Write results/report.html from a finished analysis and return its path."""
     results_dir = Path(results_dir)
     summary = json.loads((results_dir / "summary.json").read_text())
+    if summary.get("kind") == "general":
+        from .general.report import build_general
+        return build_general(results_dir, summary)
     import pandas as pd
     per_photo = pd.read_csv(results_dir / "per_photo.csv").to_dict(orient="list")
     m, p = summary["mechanics"], summary["bands"]["primary"]
@@ -174,15 +209,7 @@ def build(results_dir: str | Path) -> Path:
     card_html = "".join(f'<div class="card"><div class="k">{html.escape(k)}</div><div class="v">{html.escape(v)}</div>'
                         f'<div class="s">{html.escape(s)}</div></div>' for k, v, s in cards)
     flags_html = "".join(f"<li>{html.escape(f)}</li>" for f in summary["flags"]) or "<li>Nothing flagged.</li>"
-    findings_html = ""
-    for f in summary["correlation"]["findings"]:
-        colour = STRENGTH_COLOURS[f["strength"]]
-        evidence = "".join(f"<tr><td>{html.escape(str(k))}</td><td>{html.escape(str(v))}</td></tr>" for k, v in f["evidence"].items())
-        caveats = "".join(f"<li>{html.escape(c)}</li>" for c in f["caveats"])
-        findings_html += (f'<div class="finding"><span class="badge" style="background:{colour}">{html.escape(f["strength"])}</span>'
-                          f'<div class="ft">{html.escape(f["statement"])}</div>'
-                          f'<details><summary>Evidence and method</summary><p class="method">{html.escape(f["method"])}</p>'
-                          f'<table>{evidence}</table><ul class="caveats">{caveats}</ul></details></div>')
+    findings_html = findings_section(summary["correlation"]["findings"])
     cells_png = _cells_figure(summary, per_photo)
     strain_html = "".join(f'<figure><img src="data:image/png;base64,{png}"><figcaption>{html.escape(t)}</figcaption></figure>'
                           for t, png in _strain_figures(results_dir, summary))
@@ -191,19 +218,7 @@ def build(results_dir: str | Path) -> Path:
     page = f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
 <title>{html.escape(summary['project'])} — StrainLink report</title>
 <style>
-:root{{--ink:{INK};--muted:{MUTED};--accent:{ACCENT};--line:#e6e8ef;--bg:#ffffff;--soft:#f6f7fb}}
-*{{box-sizing:border-box}} body{{margin:0;background:var(--bg);color:var(--ink);font:14px/1.5 -apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI",Roboto,sans-serif}}
-main{{max-width:1040px;margin:0 auto;padding:32px 28px 64px}}
-h1{{font-size:24px;margin:0 0 4px}} h2{{font-size:17px;margin:34px 0 12px;padding-bottom:6px;border-bottom:1px solid var(--line)}}
-.meta{{color:var(--muted);font-size:12.5px}} .synthetic{{margin:14px 0;padding:10px 14px;border-radius:10px;background:#fff4e6;color:#a44a00;font-weight:600;font-size:13px}}
-.cards{{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:10px}}
-.card{{background:var(--soft);border-radius:12px;padding:12px 14px}} .card .k{{color:var(--muted);font-size:12px}} .card .v{{font-size:20px;font-weight:650;margin-top:2px}} .card .s{{color:var(--muted);font-size:11.5px}}
-ul.flags li{{margin:4px 0}} .finding{{border:1px solid var(--line);border-radius:12px;padding:12px 14px;margin:10px 0}}
-.badge{{display:inline-block;color:#fff;font-size:11px;font-weight:650;border-radius:20px;padding:1px 9px;text-transform:uppercase;letter-spacing:.03em}}
-.ft{{margin:6px 0 2px;font-size:14.5px}} details summary{{cursor:pointer;color:var(--accent);font-size:12.5px}} .method{{color:var(--muted);font-size:12.5px}}
-table{{border-collapse:collapse;font-size:12.5px;margin:6px 0}} td{{padding:3px 12px 3px 0;border-bottom:1px solid var(--line)}} .caveats{{color:#a44a00;font-size:12.5px}}
-img{{max-width:100%}} .grid{{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:14px}} figure{{margin:0}} figcaption{{color:var(--muted);font-size:12px;text-align:center}}
-.foot{{margin-top:40px;color:var(--muted);font-size:12px}} @media print{{main{{padding:0}} details{{display:block}} details>summary{{display:none}}}}
+{STYLE}
 </style></head><body><main>
 <h1>{html.escape(summary['project'])}</h1>
 <div class="meta">StrainLink {html.escape(summary['version'])} · analysed {html.escape(summary['finished'])} · {summary['frames']} photos · {summary['seconds']:.0f} s</div>

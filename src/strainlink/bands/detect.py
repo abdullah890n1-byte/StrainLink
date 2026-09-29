@@ -264,7 +264,7 @@ def detect_bands(
     gamma: np.ndarray,
     x: np.ndarray,
     z: np.ndarray,
-    wall_height_mm: float,
+    wall_height_mm: float | None,
     settings: DetectionSettings | None = None,
     uz: np.ndarray | None = None,
     reconstructed: np.ndarray | None = None,
@@ -275,6 +275,9 @@ def detect_bands(
     same shape; x, z are reference positions in the wall frame (mm).
     reconstructed marks points whose displacement was refilled across lost
     correlation (strain.fill_displacement_gaps); bands through them are flagged.
+    wall_height_mm None: no retaining wall (any object). Bands are then
+    labelled "zone", there is no primary band, and "runs along the edge" is
+    judged against the object's own outline.
     """
     settings = settings or DetectionSettings()
     spacing = _grid_spacing(x, z)
@@ -323,7 +326,9 @@ def detect_bands(
             continue
         if width > settings.max_width_mm:
             continue  # a diffuse zone, not a localised band
-        if _along_data_edge(points, x, z, valid, spacing):
+        along_edge = (_along_data_edge(points, x, z, valid, spacing) if wall_height_mm is not None
+                      else _along_outline(points, x, z, valid, spacing))
+        if along_edge:
             continue
         peak = float(np.nanmedian(line.peak[keep]))
         band = DetectedBand(
@@ -333,6 +338,10 @@ def detect_bands(
         _band_flags(band, valid, z, rows, cols, settings, width / spacing, reconstructed)
         bands.append(band)
 
+    if wall_height_mm is None:
+        for band in bands:
+            band.label = "zone"
+        return FrameBands(bands=bands, primary=None, gamma_noise=gamma_noise, ridge_threshold=high)
     _label_bands(bands, wall_height_mm, settings.attach_tolerance_mm)
     primary_band = next((b for b in bands if b.label == "primary"), None)
     primary = None
@@ -347,6 +356,24 @@ def _along_data_edge(points: np.ndarray, x: np.ndarray, z: np.ndarray, valid: np
     z_bottom = np.nanmin(np.where(valid, z, np.nan))
     x_right = np.nanmax(np.where(valid, x, np.nan))
     near = (points[:, 1] >= z_top - margin) | (points[:, 1] <= z_bottom + margin) | (points[:, 0] >= x_right - margin)
+    return bool(near.mean() > EDGE_ARTEFACT_FRACTION)
+
+
+def _along_outline(points: np.ndarray, x: np.ndarray, z: np.ndarray, valid: np.ndarray, spacing: float) -> bool:
+    """Any object: a path lying mostly next to the edge of the measured area is an edge artefact."""
+    outside = ~valid
+    if not outside.any():
+        outside = np.zeros_like(valid)
+        outside[[0, -1], :] = outside[:, [0, -1]] = True
+    else:
+        outside = outside.copy()
+        outside[[0, -1], :] = outside[:, [0, -1]] = True
+    distance = ndimage.distance_transform_edt(~outside) * spacing
+    x0, dx = x[0, 0], x[0, 1] - x[0, 0]
+    z0, dz = z[0, 0], z[1, 0] - z[0, 0]
+    rows = np.clip(np.round((points[:, 1] - z0) / dz).astype(int), 0, valid.shape[0] - 1)
+    cols = np.clip(np.round((points[:, 0] - x0) / dx).astype(int), 0, valid.shape[1] - 1)
+    near = distance[rows, cols] <= EDGE_BAND_GRID * spacing
     return bool(near.mean() > EDGE_ARTEFACT_FRACTION)
 
 

@@ -78,6 +78,8 @@ def compare(project_dir: str | Path) -> dict:
     """All checks for an analysed synthetic project. Raises FileNotFoundError without truth.json."""
     project_dir = Path(project_dir)
     truth = json.loads(find_truth(project_dir).read_text())
+    if truth.get("kind") == "general":
+        return _result(compare_general(project_dir, truth), truth)
     summary = json.loads((project_dir / "results" / "summary.json").read_text())
     checks: list[Check] = []
     m, p = summary["mechanics"], summary["bands"]["primary"]
@@ -180,9 +182,124 @@ def compare(project_dir: str | Path) -> dict:
                             finding["strength"], "present (built into the test)", "", "graded strong or moderate",
                             finding["strength"] in ("strong", "moderate"), finding["statement"]))
 
+    return _result(checks, truth)
+
+
+def _result(checks: list[Check], truth: dict) -> dict:
     # Plain Python types only: the result is sent to the app as JSON (numpy bools are not serialisable).
     rows = [{**asdict(c), "ok": bool(c.ok), "flagged": bool(c.flagged and not c.ok)} for c in checks]
     flagged = int(sum(r["flagged"] for r in rows))
     passed = int(sum(r["ok"] for r in rows))
-    return {"preset": truth.get("preset"), "texture": truth.get("texture", "generated grains"), "checks": rows,
-            "passed": passed, "flagged": flagged, "silent": len(rows) - passed - flagged, "total": len(rows)}
+    return {"preset": truth.get("preset") or truth.get("mode"), "texture": truth.get("texture", "generated grains"),
+            "checks": rows, "passed": passed, "flagged": flagged, "silent": len(rows) - passed - flagged,
+            "total": len(rows)}
+
+
+# --- any test (kind "general") ---------------------------------------------------
+
+TOL_STRAIN_FRACTION = 0.05
+TOL_STRAIN_ABS = 1e-4
+TOL_ZONE_ANGLE_DEG = 3.0
+TOL_ZONE_POSITION_MM = 1.0
+TOL_JUMP_FRACTION = 0.1
+TOL_JUMP_ABS_MM = 0.02
+# Photos compared for the strain checks.
+STRAIN_CHECK_EVERY = 10
+LINK_STRENGTHS = ("strong", "moderate")
+
+
+def compare_general(project_dir: Path, truth: dict) -> list[Check]:
+    summary = json.loads((project_dir / "results" / "summary.json").read_text())
+    import pandas as pd
+    per_photo = pd.read_csv(project_dir / "results" / "per_photo.csv")
+    checks: list[Check] = []
+    interval = float(np.median(np.diff(per_photo["time_s"])))
+
+    sync = summary["sync"]
+    if "clock_offset_s" in sync:
+        err = sync["clock_offset_s"] - truth["clock_offset_s"]
+        tol = 0.25 * interval
+        sigma = sync.get("offset_sigma_s") or 0.0
+        checks.append(Check("Timing", "Photos matched to the logger clock (offset)",
+                            f"{sync['clock_offset_s']:.2f} s ± {sigma:.2f}",
+                            f"{truth['clock_offset_s']:.2f} s", f"{err:+.2f} s", f"±{tol:.2f} s (¼ photo interval)",
+                            abs(err) <= tol,
+                            "StrainLink reported the match as uncertain" if any("matched to the logger" in f for f in summary["flags"]) else "",
+                            flagged=any("matched to the logger" in f for f in summary["flags"])))
+
+    for label, key in (("εxx", "mean_exx"), ("εzz", "mean_ezz")):
+        found_all = per_photo.get(f"strain {label}")
+        if found_all is None:
+            continue
+        for k in range(STRAIN_CHECK_EVERY, len(per_photo), STRAIN_CHECK_EVERY):
+            found, true = float(found_all[k]), float(truth[key][k])
+            tol = max(TOL_STRAIN_FRACTION * abs(true), TOL_STRAIN_ABS)
+            checks.append(Check("Strain of the object", f"Strain {label} at photo {k + 1}", f"{found * 100:.3f}%",
+                                f"{true * 100:.3f}%", f"{(found - true) * 100:+.3f}%",
+                                f"±{max(TOL_STRAIN_FRACTION * 100, 0):.0f}% (min {TOL_STRAIN_ABS * 100:.2f}%)",
+                                abs(found - true) <= tol))
+
+    zones = summary.get("zones", [])
+    main = max(zones, key=lambda zz: (lastv(zz["length_mm"]) or 0), default=None)
+    if main is None:
+        checks.append(Check("Localisation zone", "Zone found", "none", "one zone", "missed", "found", False))
+        return checks
+    bands = json.loads((project_dir / "results" / "bands.json").read_text())
+    last = next((b for b in bands[-1] if b["name"] == main["name"]), None)
+    mode_word = {"opening": "crack (opening)", "shear": "shear band (sliding)", "mixed": "mixed"}
+    checks.append(Check("Localisation zone", "Type of zone", mode_word.get(main["mode"], main["mode"]),
+                        mode_word[truth["mode"]], "same" if main["mode"] == truth["mode"] else "different",
+                        "same type", main["mode"] == truth["mode"]))
+    if last is not None:
+        pts = np.asarray(last["points"], float)
+        chord = pts[-1] - pts[0]
+        angle = float(np.degrees(np.arctan2(chord[1], chord[0])) % 180.0)
+        err = (angle - truth["zone_angle_deg"] + 90) % 180 - 90
+        checks.append(Check("Localisation zone", "Direction of the zone", f"{angle:.1f}°", f"{truth['zone_angle_deg']:.1f}°",
+                            f"{err:+.1f}°", f"±{TOL_ZONE_ANGLE_DEG:.0f}°", abs(err) <= TOL_ZONE_ANGLE_DEG))
+        true_line = np.asarray(truth["zone_points_mm"], float)
+        from scipy.spatial import cKDTree
+        distance = float(np.mean(cKDTree(true_line).query(pts)[0]))
+        checks.append(Check("Localisation zone", "Position of the zone (mean distance to the true line)",
+                            f"{distance:.2f} mm", "0 mm", f"{distance:.2f} mm", f"≤ {TOL_ZONE_POSITION_MM} mm",
+                            distance <= TOL_ZONE_POSITION_MM,
+                            "reference positions (first photo)"))
+    # Onset is compared in photos, so a wrong clock match (checked above) cannot hide or cause an onset error.
+    axis = per_photo[summary["axis"]["label"]].to_numpy(float)
+    if main.get("onset") is not None:
+        found_photo = int(np.nanargmin(np.abs(axis - main["onset"])))
+        err = found_photo - truth["onset_photo"]
+        checks.append(Check("Localisation zone", "Zone appears at", f"photo {found_photo + 1}",
+                            f"photo {truth['onset_photo'] + 1}", f"{err:+d} photo(s)", "±1 photo", abs(err) <= 1))
+    checks.append(Check("Localisation zone", "Zone runs right across the object", "yes" if main.get("through") is not None else "no",
+                        "yes", "", "same", main.get("through") is not None))
+    jump_key = "opening_mm" if truth["mode"] == "opening" else "slip_mm"
+    col = next((c for c in per_photo.columns if c.startswith(main["name"] + " ") and ("opening" in c or "slip" in c)), None)
+    if col is not None and truth.get(jump_key):
+        found, true = float(per_photo[col].iloc[-1]), float(truth[jump_key][-1])
+        tol = max(TOL_JUMP_FRACTION * abs(true), TOL_JUMP_ABS_MM)
+        what = "opening" if truth["mode"] == "opening" else "slip"
+        checks.append(Check("Localisation zone", f"Zone {what} at the last photo", f"{found:.3f} mm", f"{true:.3f} mm",
+                            f"{found - true:+.3f} mm", f"±{TOL_JUMP_FRACTION * 100:.0f}% (min {TOL_JUMP_ABS_MM} mm)",
+                            abs(found - true) <= tol,
+                            "opening is signed: positive = the sides move apart" if what == "opening" else ""))
+
+    findings = summary["correlation"]["findings"]
+    channel, _ = truth["planted_link"]
+    link = [f for f in findings if channel in f["title"] and main["name"] in f["title"] and f["key"].startswith("coincide")]
+    best = min(link, key=lambda f: ("strong", "moderate", "weak", "not supported").index(f["strength"]), default=None)
+    checks.append(Check("Correlation engine", f"Finds the built-in link: {channel} drops when the zone forms",
+                        best["strength"] if best else "not found", "present (built into the test)", "",
+                        "graded strong or moderate", bool(best and best["strength"] in LINK_STRENGTHS),
+                        best["statement"] if best else ""))
+    unrelated = truth["unrelated_channel"]
+    false = [f for f in findings if unrelated in f["title"] and f["strength"] in LINK_STRENGTHS]
+    checks.append(Check("Correlation engine", f"No false link for the unrelated channel ({unrelated})",
+                        f"{len(false)} link(s) graded moderate or strong", "none", "", "none", not false,
+                        "; ".join(f["statement"] for f in false)))
+    return checks
+
+
+def lastv(values):
+    finite = [v for v in values if v is not None and np.isfinite(v)]
+    return finite[-1] if finite else None

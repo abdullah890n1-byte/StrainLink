@@ -49,7 +49,7 @@ def main(argv: list[str] | None = None) -> int:
         if not args.no_report:
             out = report.build(Path(args.project).parent / "results")
             print(f"Report: {out}")
-        for flag in summary.flags:
+        for flag in (summary["flags"] if isinstance(summary, dict) else summary.flags):
             print(f"  review: {flag}")
         return 0
     if args.command == "demo":

@@ -174,7 +174,14 @@ def _permutation_p(x: np.ndarray, y: np.ndarray) -> float:
 
 # --- layer 2: timing coincidences --------------------------------------------
 
-def coincidences(sensor_events: list[Event], soil_events: list[Event]) -> list[Finding]:
+def coincidences(sensor_events: list[Event], soil_events: list[Event],
+                 axis: tuple[str, str] = ("wall push", "mm")) -> list[Finding]:
+    """Pairs of sensor and soil/object events that happen together.
+
+    axis: (name, unit) of the common axis the events are placed on
+    (Event.push_mm holds the value on that axis).
+    """
+    name, unit = axis
     findings = []
     for s in sensor_events:
         close = []
@@ -187,25 +194,35 @@ def coincidences(sensor_events: list[Event], soil_events: list[Event]) -> list[F
             continue
         close.sort(key=lambda c: c[0])
         z, delta, sigma, d = close[0]
-        ambiguous = len(close) > 1
+        # Ambiguous only if the sensor event also coincides with a *different* band or zone
+        # (two events of the same band at one moment are one physical event).
+        ambiguous = any(c[3].subject != d.subject for c in close[1:])
         strength = "weak" if ambiguous or z > 1.0 else "moderate"
-        when = ("at the same wall push as" if abs(delta) < 0.5 * sigma
-                else f"{abs(delta):.1f} ± {sigma:.1f} mm of push {'after' if delta > 0 else 'before'}")
+        when = (f"at the same {name} as" if abs(delta) < 0.5 * sigma
+                else f"{abs(delta):.{_digits(sigma)}f} ± {sigma:.{_digits(sigma)}f} {unit} of {name} {'after' if delta > 0 else 'before'}")
+        digits = _digits(sigma)
         statement = (f"{s.label} {when} {d.phrase or d.label} "
-                     f"({s.push_mm:.1f} vs {d.push_mm:.1f} mm).")
+                     f"({s.push_mm:.{digits}f} vs {d.push_mm:.{digits}f} {unit}).")
         caveats = ["A single timing coincidence does not show cause."]
         if ambiguous:
-            others = ", ".join(c[3].label for c in close[1:])
+            others = ", ".join(c[3].label for c in close[1:] if c[3].subject != d.subject)
             caveats.append(f"Also coincides with: {others}.")
         findings.append(Finding(f"coincide:{s.key}:{d.key}", f"{s.label} ↔ {d.label}", statement, strength,
                                 "Event timing comparison with combined uncertainty (2σ window).",
-                                {"sensor event (mm)": round(s.push_mm, 2), "soil event (mm)": round(d.push_mm, 2),
-                                 "difference (mm)": round(delta, 2), "combined σ (mm)": round(sigma, 2)},
+                                {f"sensor event ({unit})": round(s.push_mm, 3), f"{d.source} event ({unit})": round(d.push_mm, 3),
+                                 f"difference ({unit})": round(delta, 3), f"combined σ ({unit})": round(sigma, 3)},
                                 caveats, [s.key, d.key]))
     return findings
 
 
 # --- layer 3: continuous screening and prediction -----------------------------
+
+def _digits(scale: float) -> int:
+    """Decimals that show a quantity of this size without false precision."""
+    if not np.isfinite(scale) or scale <= 0:
+        return 1
+    return int(min(max(1 - math.floor(math.log10(scale)), 0), 4))
+
 
 def screen(frames: pd.DataFrame, sensor_columns: list[str], soil_columns: list[str]) -> list[Finding]:
     """Rank-correlate frame-to-frame changes, with lag search inside the permutation test."""
@@ -222,8 +239,14 @@ def screen(frames: pd.DataFrame, sensor_columns: list[str], soil_columns: list[s
             continue
         rho, lag = _best_lag(ds, dd)
         # Null: circular shifts keep each series' own autocorrelation but break alignment.
-        null = [abs(_best_lag(ds, np.roll(dd, int(rng.integers(MAX_LAG_FRAMES + 1, len(dd) - MAX_LAG_FRAMES))))[0])
-                for _ in range(PERMUTATIONS // 4)]
+        # Only len - 2*(MAX_LAG+1) + 1 shifts are distinct, so all of them are used (drawing
+        # more at random repeats them and makes p look smaller than the data allow).
+        shifts = np.arange(MAX_LAG_FRAMES + 1, len(dd) - MAX_LAG_FRAMES)
+        if len(shifts) > PERMUTATIONS // 4:
+            shifts = rng.choice(shifts, PERMUTATIONS // 4, replace=False)
+        if len(shifts) + 1 < 1 / FDR_LEVEL:
+            continue    # too few photos: even a perfect match could not reach significance
+        null = [abs(_best_lag(ds, np.roll(dd, int(k)))[0]) for k in shifts]
         p = (1 + np.sum(np.array(null) >= abs(rho))) / (1 + len(null))
         rows.append((s_col, d_col, rho, lag, p, len(ds)))
     if not rows:

@@ -157,7 +157,7 @@ def _primary_history(frames: list[FrameBands], delta: np.ndarray) -> PrimaryHist
 def _secondary_tracks(frames: list[FrameBands], delta: np.ndarray) -> list[BandTrack]:
     tracks: list[BandTrack] = []
     counters: dict[str, int] = {}
-    prefixes = {"radial": "R", "intermediate": "I", "wall-interface": "W", "unattached": "U"}
+    prefixes = {"radial": "R", "intermediate": "I", "wall-interface": "W", "unattached": "U", "zone": "Z"}
     for k, frame in enumerate(frames):
         claimed: set[int] = set()
         for band in sorted((b for b in frame.bands if b.label != "primary"), key=lambda b: -b.length_mm):

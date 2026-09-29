@@ -16,9 +16,15 @@ const FACTORS = { s: 1, ms: 1e-3, min: 60, kN: 1, N: 1e-3, MN: 1e3, lbf: 4.44822
 const BAND_COLOURS = { primary: "--band-primary", radial: "--band-radial", intermediate: "--band-intermediate", "wall-interface": "--band-wall", unattached: "--band-other" };
 const BAND_NAMES = { primary: "Band-1 (primary slip surface)", radial: "Radial band (from wall top)", intermediate: "Intermediate band", "wall-interface": "Wall-interface shear zone", unattached: "Other band" };
 const STAGES = ["Loading", "Measuring soil movement (DIC)", "Finding shear bands", "Reading sensors", "Synchronising clocks", "Engineering results", "Correlation engine", "Saving results"];
+const STAGES_GENERAL = ["Loading", "Measuring movement (DIC)", "Strain and localisation zones", "Reading sensors", "Matching clocks", "Correlation engine", "Saving results"];
+// Any-test mode: zones are coloured by what they do (crack opens, shear band slides).
+const MODE_COLOURS = { opening: "#e8590c", shear: "#7048e8", mixed: "#1098ad", "": "#868e96" };
+const MODE_NAMES = { opening: "Crack (the sides open)", shear: "Shear band (the sides slide)", mixed: "Mixed-mode zone", "": "Zone" };
+const MODE_SHORT = { opening: "crack", shear: "shear band", mixed: "mixed", "": "zone" };
+function isGeneral() { return state.kind === "general"; }
 
 const state = {
-  step: 0, photos: null, photosFolder: "", video: null, interval: null, sensors: null, sensorPath: "", calPath: "",
+  kind: "wall", step: 0, photos: null, photosFolder: "", video: null, interval: null, sensors: null, sensorPath: "", calPath: "",
   channels: [], cal: { points: [], toe: null, tool: "scale" }, projectPath: "", results: null, frame: 0, playing: null, frameCache: {},
 };
 
@@ -55,7 +61,8 @@ $("#btn-demo").onclick = async () => {
   const preset = $("#demo-choice .on").dataset.preset;
   const started = await api().start_demo(preset);
   if (!started.ok) return toast(started.error);
-  runProgress(`Demo: ${preset} sand`, (res) => openResults(res.project));
+  const crack = preset === "crack";
+  runProgress(crack ? "Demo: a plate that cracks" : `Demo: ${preset} sand`, (res) => openResults(res.project), crack ? ["Creating the demo test (synthetic photos and logs)", ...STAGES_GENERAL] : STAGES);
 };
 
 async function openProject(path) {
@@ -66,6 +73,18 @@ async function openProject(path) {
 }
 
 /* ---------------- wizard ---------------- */
+// What is being tested decides which steps and results apply (one switch for the whole page).
+function setKind(kind) {
+  state.kind = kind;
+  document.body.classList.toggle("kind-general", kind === "general");
+  $$("#kind-choice button").forEach((b) => b.classList.toggle("on", b.dataset.kind === kind));
+  $('#steps li[data-step="1"]').textContent = kind === "general" ? "Scale" : "Scale & wall";
+  $('#steps li[data-step="2"]').textContent = kind === "general" ? "Name & timing" : "Test details";
+  if (state.sensors) renderMapping();
+  if (state.photosFolder && kind === "general") loadArea();
+  updateNav();
+}
+$$("#kind-choice button").forEach((b) => b.onclick = () => setKind(b.dataset.kind));
 const STEP_COUNT = 4;
 function startWizard() {
   Object.assign(state, { step: 0, photos: null, photosFolder: "", video: null, interval: null, sensors: null, sensorPath: "", calPath: "",
@@ -80,7 +99,7 @@ function goStep(n) {
   $$("#steps li").forEach((li) => { const i = +li.dataset.step; li.classList.toggle("on", i === n); li.classList.toggle("done", i < n && stepValid(i)); });
   $("#btn-back").style.visibility = n === 0 ? "hidden" : "visible";
   $("#btn-next").classList.toggle("hidden", n === STEP_COUNT - 1);
-  if (n === 1) drawCalibration();
+  if (n === 1) { drawCalibration(); if (isGeneral() && state.areaFor !== state.photosFolder) { state.areaFor = state.photosFolder; loadArea(); } }
   if (n === 2) fillTestDetails();
   if (n === 3) fillReview();
   updateNav();
@@ -89,6 +108,13 @@ function photosTimed() {
   return !!state.photos && (!["file-time", "index"].includes(state.photos.time_source) || !!state.interval || syncMode() === "push-step");
 }
 function stepValid(i) {
+  if (isGeneral()) {
+    // Any test: photos are enough; a logger (optional) needs a time column and timed photos.
+    if (i === 0) return !!state.photos && (!state.sensors || (photosTimed() && state.channels.some((c) => c.role === "time")));
+    if (i === 1) return !!mmPerPx();
+    if (i === 2) return true;
+    return [0, 1, 2].every(stepValid);
+  }
   if (i === 0) return photosTimed() && !!state.sensors && ["time", "force", "displacement"].every((r) => state.channels.some((c) => c.role === r));
   if (i === 1) return !!mmPerPx() && !!state.cal.toe && +$("#wall-h").value > 0;
   if (i === 2) return +$("#gamma").value > 0 && +$("#wall-w").value > 0;
@@ -99,8 +125,9 @@ function updateNav() {
   $("#btn-next").disabled = !ok;
   let hint = "";
   if (!ok && state.step === 0) hint = !state.photos ? "Choose or drop your test folder." : !photosTimed() ? "Tell StrainLink how often the photos were taken."
-    : !state.sensors ? "Choose the data-logger file." : "Mark the time, force and wall-push columns.";
+    : isGeneral() ? "Mark the time column of the logger file." : !state.sensors ? "Choose the data-logger file." : "Mark the time, force and wall-push columns.";
   if (!ok && state.step === 1) hint = !mmPerPx() ? "Click two points a known distance apart (or type the scale)." : "Now click the wall toe: the bottom corner of the wall face.";
+  if (ok && state.step === 0 && isGeneral() && !state.sensors) hint = "No logger file: StrainLink will measure the object only (add one to correlate with sensors).";
   if (!ok && state.step === 2) hint = "Enter the unit weight and the wall width.";
   $("#step-hint").textContent = hint;
 }
@@ -125,7 +152,9 @@ async function scanFolder(folder) {
   if (r.video) await useVideo(r.video);
   else if (r.photos) await inspectPhotos(r.photos);
   else markFound("photos", false, "no photos or video found — choose the photo folder or the video");
-  if (r.logger) await loadSensors(r.logger); else markFound("logger", false, "not found — choose the logger export");
+  if (r.logger) await loadSensors(r.logger);
+  else if (isGeneral()) markFound("logger", false, "none — optional: add one to correlate the object with your sensor records", true);
+  else markFound("logger", false, "not found — choose the logger export");
   setCalibration(r.calibration);
   updateNav();
 }
@@ -216,12 +245,13 @@ function renderMapping() {
   $$(".role", body).forEach((s) => s.onchange = () => { const c = state.channels[+s.dataset.i]; c.role = s.value; c.unit = normaliseUnit(c.unit, c.role); c.confidence = 1; renderMapping(); updateNav(); });
   $$(".unit", body).forEach((s) => s.onchange = () => { state.channels[+s.dataset.i].unit = s.value; });
   $$(".cname", body).forEach((s) => s.onchange = () => { state.channels[+s.dataset.i].name = s.value.trim() || state.channels[+s.dataset.i].column; });
-  const missing = ["time", "force", "displacement"].filter((r) => !state.channels.some((c) => c.role === r));
+  const missing = (isGeneral() ? ["time"] : ["time", "force", "displacement"]).filter((r) => !state.channels.some((c) => c.role === r));
   const w = $("#mapping-warn");
   w.classList.toggle("hidden", !missing.length);
   w.textContent = missing.length ? `Please mark which column is: ${missing.map((m) => ROLES.find((r) => r[0] === m)[1]).join(", ")} (open “Check the logger columns”).` : "";
   const cells = state.channels.filter((c) => c.role === "pressure").length;
   $("#mapping-summary").innerHTML = missing.length ? "Check the logger columns — <b>something needs your help</b>"
+    : isGeneral() ? `Logger columns: time + ${state.channels.filter((c) => c.role !== "time").length} other(s), all used for correlation <span class="muted">(check or change)</span>`
     : `Logger columns recognised: time, force, wall push${cells ? `, ${cells} pressure cells` : ""} <span class="muted">(check or change)</span>`;
   if (missing.length) $("#mapping-box").open = true;
 }
@@ -263,18 +293,59 @@ function drawCalibration() {
       g.beginPath(); g.moveTo(...a); g.lineTo(...b); g.stroke();
       tag(`${$("#scale-mm").value} mm`, (a[0] + b[0]) / 2 - 20 * u, (a[1] + b[1]) / 2 - 16 * u, "#9db8ff");
     }
+    if (state.cal.box) {
+      const [x0, y0, x1, y1] = state.cal.box;
+      g.strokeStyle = "#fff"; g.lineWidth = 2 * u; g.setLineDash([8 * u, 6 * u]);
+      g.strokeRect(Math.min(x0, x1), Math.min(y0, y1), Math.abs(x1 - x0), Math.abs(y1 - y0)); g.setLineDash([]);
+      tag("measured area limited to this box", Math.min(x0, x1) + 8 * u, Math.min(y0, y1) + 16 * u, "#fff");
+    }
     state.cal.points.forEach((p) => dot(p, accent));
     if (state.cal.toe) { dot(state.cal.toe, "#e0452b"); tag("toe", state.cal.toe[0] + 10 * u, state.cal.toe[1] + 14 * u, "#ff8a70"); }
     const facts = [];
     if (mmpp) facts.push(`<span class="fact good">Scale <b>${mmpp.toFixed(4)}</b> mm/px</span>`);
     else facts.push('<span class="fact">Scale: click two points</span>');
-    facts.push(state.cal.toe ? `<span class="fact good">Wall toe at <b>${(state.cal.toe[0] / s).toFixed(0)}, ${(state.cal.toe[1] / s).toFixed(0)}</b> px</span>` : '<span class="fact">Wall toe: not set</span>');
+    if (!isGeneral()) facts.push(state.cal.toe ? `<span class="fact good">Wall toe at <b>${(state.cal.toe[0] / s).toFixed(0)}, ${(state.cal.toe[1] / s).toFixed(0)}</b> px</span>` : '<span class="fact">Wall toe: not set</span>');
     $("#cal-facts").innerHTML = facts.join("");
     updateNav();
   };
   if (calImage.src !== state.photos.first) { calImage.onload = draw; calImage.src = state.photos.first; } else draw();
   drawCalibration.redraw = draw;
 }
+// Any test: show the area StrainLink will measure (found automatically on the first photo).
+async function loadArea() {
+  $("#area-note").textContent = "Finding the object…"; $("#area-img").removeAttribute("src");
+  const r = await api().preview_area(state.photosFolder, roiPx());
+  if (!r.ok) { $("#area-note").textContent = r.error; return; }
+  $("#area-img").src = r.image;
+  $("#area-note").textContent = `${Math.round(100 * r.share)}% of the photo is measured. If the outline misses part of the object, check its speckle pattern and focus.`;
+}
+// The optional box that limits the measured area, in photo pixels (the canvas shows a scaled preview).
+function roiPx() {
+  const b = state.cal.box; if (!b) return null;
+  const s = state.photos.preview_scale;
+  return [Math.min(b[0], b[2]) / s, Math.min(b[1], b[3]) / s, Math.max(b[0], b[2]) / s, Math.max(b[1], b[3]) / s].map(Math.round);
+}
+function canvasPoint(e) {
+  const c = $("#cal-canvas"); const r = c.getBoundingClientRect();
+  return [(e.clientX - r.left) * c.width / r.width, (e.clientY - r.top) * c.height / r.height];
+}
+$("#cal-canvas").onmousedown = (e) => {
+  if (state.cal.tool !== "area") return;
+  const p = canvasPoint(e); state.cal.dragging = [...p, ...p];
+};
+$("#cal-canvas").onmousemove = (e) => {
+  if (!state.cal.dragging) return;
+  const p = canvasPoint(e); state.cal.dragging[2] = p[0]; state.cal.dragging[3] = p[1];
+  state.cal.box = state.cal.dragging; drawCalibration.redraw && drawCalibration.redraw();
+};
+document.addEventListener("mouseup", () => {
+  if (!state.cal.dragging) return;
+  const b = state.cal.dragging; state.cal.dragging = null;
+  state.cal.box = Math.abs(b[2] - b[0]) > 10 && Math.abs(b[3] - b[1]) > 10 ? b : null;
+  $("#clear-area").classList.toggle("hidden", !state.cal.box);
+  drawCalibration.redraw && drawCalibration.redraw(); loadArea();
+});
+$("#clear-area").onclick = () => { state.cal.box = null; $("#clear-area").classList.add("hidden"); drawCalibration.redraw && drawCalibration.redraw(); loadArea(); };
 function mmPerPx() {
   const direct = +$("#scale-direct").value;
   if (direct > 0) return direct;
@@ -285,11 +356,12 @@ function mmPerPx() {
   return px > 0 && mm > 0 ? mm / px : null;
 }
 $("#cal-canvas").onclick = (e) => {
+  if (state.cal.tool === "area") return;       // the box is drawn by dragging
   const c = e.currentTarget; const r = c.getBoundingClientRect();
   const p = [(e.clientX - r.left) * c.width / r.width, (e.clientY - r.top) * c.height / r.height];
   if (state.cal.tool === "scale") {
     state.cal.points = state.cal.points.length >= 2 ? [p] : [...state.cal.points, p];
-    if (state.cal.points.length === 2) { $$(".tool").forEach((x) => x.classList.toggle("on", x.dataset.tool === "toe")); state.cal.tool = "toe"; }
+    if (state.cal.points.length === 2 && !isGeneral()) { $$(".tool").forEach((x) => x.classList.toggle("on", x.dataset.tool === "toe")); state.cal.tool = "toe"; }
   } else state.cal.toe = p;
   drawCalibration.redraw && drawCalibration.redraw();
 };
@@ -320,6 +392,17 @@ function syncMode() { const r = $('input[name="sync"]:checked'); return r ? r.va
 /* step 3: review and run */
 function buildProject() {
   const s = state.photos.preview_scale; const mmpp = mmPerPx();
+  if (isGeneral()) {
+    return {
+      kind: "general", name: $("#proj-name").value || "Untitled test",
+      images: { folder: state.photosFolder, ...(state.interval ? { interval_s: state.interval } : {}),
+                ...(state.video ? { video: state.video.path, video_every_s: state.video.every_s } : {}) },
+      calibration: { mm_per_px: mmpp, ...(roiPx() ? { roi_px: roiPx() } : {}) },
+      ...(state.sensorPath ? { sensors: { file: state.sensorPath,
+        channels: state.channels.map((c) => ({ column: c.column, role: c.role === "ignore" ? "ignore" : c.role, unit: c.unit, factor: FACTORS[c.unit] || 1, name: c.name, confidence: 1 })) } } : {}),
+      sync: syncMode() === "offset" ? { mode: "offset", offset_s: +$("#sync-offset").value } : { mode: "auto" },
+    };
+  }
   const cellDepths = {}; $$("#cells-body input").forEach((i) => { if (i.value) cellDepths[i.dataset.name] = +i.value; });
   const project = {
     name: $("#proj-name").value || "Untitled test",
@@ -335,7 +418,11 @@ function buildProject() {
   return project;
 }
 function fillReview() {
-  const items = [["Test", $("#proj-name").value || null], ["Photos", state.photos ? `${state.photos.count} photos` : null], ["Data-logger file", state.sensorPath ? state.sensorPath.split("/").pop() : null],
+  const items = isGeneral() ? [["Test", $("#proj-name").value || "Untitled test"], ["Kind", "Any object or test"],
+    ["Photos", state.photos ? `${state.photos.count} ${state.video ? "frames from the video" : "photos"}` : null],
+    ["Data-logger file", state.sensorPath ? state.sensorPath.split("/").pop() : { warn: "none — the object is measured, but there is nothing to correlate with" }],
+    ["Scale", mmPerPx() ? `${mmPerPx().toFixed(4)} mm/px` : null], ["Measured area", "found automatically"],
+    ["Clock matching", state.sensorPath ? (syncMode() === "offset" ? "known offset" : "automatic") : "not needed"]] : [["Test", $("#proj-name").value || null], ["Photos", state.photos ? `${state.photos.count} photos` : null], ["Data-logger file", state.sensorPath ? state.sensorPath.split("/").pop() : null],
     ["Calibration run", state.calPath ? state.calPath.split("/").pop() : { warn: "none — forces will include base friction" }], ["Scale", mmPerPx() ? `${mmPerPx().toFixed(4)} mm/px` : null],
     ["Wall toe", state.cal.toe ? "set" : null], ["Unit weight", $("#gamma").value ? `${$("#gamma").value} kN/m³` : null], ["Clock matching", { dic: "automatic", offset: "known offset", "push-step": "photo every fixed push" }[syncMode()]]];
   $("#review-list").innerHTML = items.map(([k, v]) => {
@@ -356,20 +443,20 @@ $("#btn-run").onclick = async () => {
   state.projectPath = saved.path;
   const started = await api().run_analysis(saved.path);
   if (!started.ok) return toast(started.error);
-  runProgress($("#proj-name").value, () => openResults(saved.path));
+  runProgress($("#proj-name").value, () => openResults(saved.path), isGeneral() ? STAGES_GENERAL : STAGES);
 };
 
 /* ---------------- running ---------------- */
-function runProgress(title, onDone) {
+function runProgress(title, onDone, stages = STAGES) {
   show("running", title); $("#run-title").textContent = title;
   $("#run-error").classList.add("hidden"); $("#run-back").classList.add("hidden");
-  $("#run-stages").innerHTML = STAGES.map((s) => `<li>${s}</li>`).join("");
+  $("#run-stages").innerHTML = stages.map((s) => `<li>${s}</li>`).join("");
   const t0 = Date.now();
   const timer = setInterval(async () => {
     const p = await api().progress();
-    const idx = STAGES.indexOf(p.stage);
+    const idx = stages.indexOf(p.stage);
     $$("#run-stages li").forEach((li, i) => { li.classList.toggle("done", idx > i || (!p.running && !p.error)); li.classList.toggle("now", i === idx && p.running); });
-    const overall = idx >= 0 ? (idx + p.fraction) / STAGES.length : p.fraction * 0.3;
+    const overall = idx >= 0 ? (idx + p.fraction) / stages.length : p.fraction * 0.3;
     $("#run-bar").style.width = `${Math.round(100 * Math.min(overall, 1))}%`;
     $("#run-message").textContent = `${p.stage}${p.message ? " — " + p.message : ""}`;
     $("#run-elapsed").textContent = `${Math.round((Date.now() - t0) / 1000)} s`;
@@ -398,7 +485,10 @@ async function openResults(path) {
   $("#res-title").textContent = s.project;
   $("#res-meta").textContent = `${s.frames} photos · analysed ${s.finished} · ${Math.round(s.seconds)} s · StrainLink ${s.version}`;
   $("#res-synthetic").classList.toggle("hidden", !s.synthetic);
-  renderCards(s); renderFindings(s); renderReview(s); renderAccuracy(path);
+  state.kind = s.kind === "general" ? "general" : "wall";
+  document.body.classList.toggle("kind-general", isGeneral());
+  if (isGeneral()) { renderGeneralCards(s); fillPickers(s, r.per_photo); } else renderCards(s);
+  renderFindings(s); renderReview(s); renderAccuracy(path);
   const n = s.frames - 1;
   [$("#scrub-overview"), $("#scrub-soil")].forEach((el) => { el.max = n; el.value = n; });
   state.frame = n;
@@ -492,6 +582,7 @@ function shortEvent(e) {
   return e.label;
 }
 function drawOverview() {
+  if (isGeneral()) return drawOverviewGeneral();
   const s = state.results.summary, pp = state.results.per_photo;
   const push = s.frame_push_mm[state.frame];
   const force = { x: s.mechanics.push_mm, y: s.mechanics.passive_kn, mode: "lines", name: "Passive force", line: { color: css("--ink"), width: 1.6 } };
@@ -510,9 +601,97 @@ function drawOverview() {
   Plotly.react("plot-cells", traces.length ? traces : [{ x: [], y: [] }], lc, PLOT_CONFIG);
   $("#scrub-overview-label").textContent = `${state.frame + 1} / ${s.frames} · push ${fmt(push, 1, "mm")}`;
 }
+
+/* ---------------- results: any object or test ---------------- */
+function axisText(s, v) { return `${fmt(v, 3)} ${s.axis.unit}`; }
+function renderGeneralCards(s) {
+  const pp = state.results.per_photo, zones = s.zones || [];
+  const zoneList = zones.map((z) => `${z.name} (${MODE_SHORT[z.mode || ""]})`).join(", ");
+  const cards = [
+    ["Photos analysed", String(s.frames), `${s.area.points} measurement points`],
+    ["Object size", `${fmt(s.area.size_mm[0], 1)} × ${fmt(s.area.size_mm[1], 1)} mm`, "measured area"],
+    ["Strain εxx (end)", fmt(100 * (lastValue(pp["strain εxx"] || []) ?? NaN), 3, "%"), "typical, over the object"],
+    ["Strain εzz (end)", fmt(100 * (lastValue(pp["strain εzz"] || []) ?? NaN), 3, "%"), "typical, over the object"],
+    ["Peak shear strain", fmt(lastValue(pp["peak shear strain γmax"] || []), 4), "γmax, end of test"],
+    ["Localisation zones", String(zones.length), zoneList || "none found"],
+    ...zones.slice(0, 3).map((z) => [`${z.name} appears at`, z.onset === null ? "—" : axisText(s, z.onset), `${s.axis.name}${z.through !== null ? " · runs across the object" : ""}`]),
+  ];
+  if (s.sync && s.sync.clock_offset_s !== undefined) {
+    cards.push(["Clock match", `${fmt(s.sync.clock_offset_s, 2)} s`, `± ${fmt(s.sync.offset_sigma_s, 2)} s · ${s.sync.source === "dic" ? "automatic" : s.sync.source}`,
+      s.flags.some((f) => f.includes("matched to the logger")) ? "The clock match is uncertain" : ""]);
+  }
+  const flagged = (text) => `<span class="flag" title="${esc(text)}">⚑</span>`;
+  $("#res-cards").innerHTML = cards.map(([k, v, sub, flag]) => `<div class="card">${flag ? flagged(flag) : ""}<div class="k">${k}</div><div class="v">${esc(v)}</div><div class="s">${esc(sub)}</div></div>`).join("");
+}
+function fillPickers(s, pp) {
+  const sensors = (s.sensor_columns || []).filter((c) => pp[c]);
+  const objects = (s.object_columns || []).filter((c) => pp[c]);
+  $("#pick-sensor").innerHTML = sensors.length ? sensors.map((c) => `<option>${esc(c)}</option>`).join("") : "<option value=''>no logger file</option>";
+  $("#pick-object").innerHTML = objects.map((c) => `<option>${esc(c)}</option>`).join("");
+  const preferred = objects.find((c) => /opening|slip/.test(c)) || objects.find((c) => c === "peak shear strain γmax");
+  if (preferred) $("#pick-object").value = preferred;
+  $("#pick-sensor").onchange = $("#pick-object").onchange = drawOverview;
+}
+function eventLines(events) {
+  return events.map((e) => ({ type: "line", x0: e.push_mm, x1: e.push_mm, yref: "paper", y0: 0, y1: 1,
+    line: { color: e.source === "sensor" ? css("--muted") : MODE_COLOURS.opening, width: 1, dash: "dot" } }));
+}
+function eventTags(events) {
+  return events.map((e, i) => ({ x: e.push_mm, yref: "paper", y: 0.97 - 0.09 * (i % 4), text: e.label, showarrow: false, xanchor: "left", xshift: 3,
+    font: { size: 10.5, color: e.source === "sensor" ? css("--muted") : MODE_COLOURS.opening }, bgcolor: css("--panel"), opacity: 0.95 }));
+}
+function drawOverviewGeneral() {
+  const s = state.results.summary, pp = state.results.per_photo, x = pp[s.axis.label], at = x[state.frame];
+  const sensor = $("#pick-sensor").value, object = $("#pick-object").value;
+  const objectEvents = s.correlation.events.filter((e) => e.source === "object");
+  const sensorEvents = s.correlation.events.filter((e) => e.source === "sensor" && (!sensor || e.subject === sensor));
+  const ls = plotLayout(s.axis.label, sensor || "no logger file"); ls.showlegend = false;
+  ls.shapes = [cursorShape(at), ...eventLines([...sensorEvents, ...objectEvents])]; ls.annotations = eventTags([...sensorEvents, ...objectEvents]);
+  Plotly.react("plot-force", sensor ? [{ x, y: pp[sensor], mode: "lines", line: { color: css("--ink"), width: 1.6 } }] : [{ x: [], y: [] }], ls, PLOT_CONFIG);
+  const percent = object && object.startsWith("strain") || object.startsWith("shear strain");
+  const lo = plotLayout(s.axis.label, object + (percent ? " (%)" : "")); lo.showlegend = false;
+  lo.shapes = [cursorShape(at), ...eventLines(objectEvents)];
+  const y = (pp[object] || []).map((v) => (v === null ? null : percent ? 100 * v : v));
+  Plotly.react("plot-cells", [{ x, y, mode: "lines+markers", marker: { size: 4 }, line: { color: MODE_COLOURS.opening } }], lo, PLOT_CONFIG);
+  $("#scrub-overview-label").textContent = `${state.frame + 1} / ${s.frames} · ${s.axis.name} ${axisText(s, at)}`;
+}
+function drawZonePlots() {
+  const s = state.results.summary, pp = state.results.per_photo, x = pp[s.axis.label], at = x[state.frame];
+  const zones = s.zones || [];
+  const mk = (id, traces, title) => {
+    const l = plotLayout(s.axis.label, title); l.shapes = [cursorShape(at)]; l.margin.t = 10; l.showlegend = traces.length > 1;
+    Plotly.react(id, traces.length ? traces : [{ x: [], y: [] }], l, PLOT_CONFIG);
+  };
+  const series = (suffix) => zones.map((z) => { const col = Object.keys(pp).find((c) => c.startsWith(`${z.name} `) && c.includes(suffix)); return col && { name: z.name, col, mode: z.mode }; }).filter(Boolean);
+  mk("plot-len", series("length").map((t) => ({ x, y: pp[t.col], name: t.name, mode: "lines+markers", marker: { size: 4 }, line: { color: MODE_COLOURS[t.mode || ""] } })), "Zone length (mm)");
+  mk("plot-lift", [...series("opening"), ...series("slip")].map((t) => ({ x, y: pp[t.col], name: `${t.name} ${t.col.includes("slip") ? "slip" : "opening"}`, mode: "lines+markers", marker: { size: 4 }, line: { color: MODE_COLOURS[t.mode || ""] } })), "Opening / slip (mm)");
+  mk("plot-area", ["strain εxx", "strain εzz"].filter((c) => pp[c]).map((c) => ({ x, y: pp[c].map((v) => (v === null ? null : 100 * v)), name: c, mode: "lines" })), "Strain of the object (%)");
+}
+function frameSideGeneral(f, k, showStrain) {
+  const s = state.results.summary, pp = state.results.per_photo;
+  $("#frame-label").textContent = `${s.axis.name} ${axisText(s, f.push_mm)} · photo ${k + 1}/${s.frames}`;
+  const metric = (name, v) => `<div class="m"><span>${name}</span><span>${v}</span></div>`;
+  const zoneRows = f.bands.map((b) => {
+    const opening = pp[`${b.name} opening (mm)`], slip = pp[`${b.name} slip (mm)`];
+    const jump = opening ? `opening ${fmt(opening[k], 3, "mm")}` : slip ? `slip ${fmt(slip[k], 3, "mm")}` : "";
+    return metric(`${b.name} — ${MODE_SHORT[b.mode || ""]}`, jump);
+  });
+  $("#frame-metrics").innerHTML = [
+    metric("Zones", f.bands.length ? f.bands.map((b) => b.name).join(", ") : "none yet"), ...zoneRows,
+    metric("Strain εxx", fmt(100 * (pp["strain εxx"] || [])[k], 3, "%")),
+    metric("Strain εzz", fmt(100 * (pp["strain εzz"] || [])[k], 3, "%")),
+    metric("Peak shear strain", fmt((pp["peak shear strain γmax"] || [])[k], 4)),
+    ...(s.sensor_columns || []).slice(0, 4).map((c) => metric(c, fmt(pp[c] ? pp[c][k] : null, 3))),
+  ].join("");
+  const modes = [...new Set(f.bands.map((b) => b.mode || ""))];
+  $("#legend").innerHTML = (modes.length ? modes : ["opening", "shear"]).map((m) => `<div><i style="background:${MODE_COLOURS[m]}"></i>${MODE_NAMES[m]}</div>`).join("")
+    + (showStrain ? `<div>Strain overlay: red = high shear strain (up to ${fmt(f.gamma_max, 3)})</div>` : "");
+  drawBandPlots();
+}
 $("#scrub-overview").oninput = (e) => { state.frame = +e.target.value; $("#scrub-soil").value = state.frame; drawOverview(); };
 
 function drawBandPlots() {
+  if (isGeneral()) return drawZonePlots();
   const p = state.results.summary.bands.primary, x = p.delta_mm, push = x[state.frame];
   const mk = (id, y, title, err) => {
     const l = plotLayout("Wall push (mm)", title); l.showlegend = false; l.shapes = [cursorShape(push)]; l.margin.t = 10;
@@ -549,8 +728,11 @@ async function showFrame(k) {
   $("#frame-loading").classList.add("hidden");
   $("#frame-img").src = f.image;
   const svg = $("#frame-svg"); svg.setAttribute("viewBox", `0 0 ${f.width} ${f.height}`); svg.setAttribute("preserveAspectRatio", "none");
-  svg.innerHTML = f.bands.map((b) => `<polyline points="${b.points.map((p) => p.join(",")).join(" ")}" fill="none" stroke="${css(BAND_COLOURS[b.label])}" stroke-width="3" stroke-linecap="round" opacity=".95"><title>${esc(b.name)} — ${esc(BAND_NAMES[b.label])}</title></polyline>
-    <text x="${b.points[b.points.length - 1][0] + 6}" y="${b.points[b.points.length - 1][1]}" fill="${css(BAND_COLOURS[b.label])}" font-size="15" font-weight="700" paint-order="stroke" stroke="#000" stroke-width="3">${esc(b.name)}</text>`).join("");
+  const colour = (b) => b.label === "zone" ? MODE_COLOURS[b.mode || ""] : css(BAND_COLOURS[b.label]);
+  const title = (b) => b.label === "zone" ? MODE_NAMES[b.mode || ""] : BAND_NAMES[b.label];
+  svg.innerHTML = f.bands.map((b) => `<polyline points="${b.points.map((p) => p.join(",")).join(" ")}" fill="none" stroke="${colour(b)}" stroke-width="3" stroke-linecap="round" opacity=".95"><title>${esc(b.name)} — ${esc(title(b))}</title></polyline>
+    <text x="${b.points[b.points.length - 1][0] + 6}" y="${b.points[b.points.length - 1][1]}" fill="${colour(b)}" font-size="15" font-weight="700" paint-order="stroke" stroke="#000" stroke-width="3">${esc(b.name)}</text>`).join("");
+  if (isGeneral()) { frameSideGeneral(f, k, showStrain); return true; }
   const s = state.results.summary, p = s.bands.primary;
   $("#frame-label").textContent = `Push ${fmt(f.push_mm, 1, "mm")} · photo ${k + 1}/${s.frames}`;
   const metric = (name, v) => `<div class="m"><span>${name}</span><span>${v}</span></div>`;
