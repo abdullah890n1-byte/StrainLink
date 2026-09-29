@@ -116,3 +116,66 @@ def compute_strain(
         dudx=dudx, dudy=dudy, dvdx=dvdx, dvdy=dvdy, exx=exx, eyy=eyy, exy=exy,
         e1=e1, e2=e2, gamma_max=e1 - e2, volumetric=e1 + e2,
     )
+
+
+# Lost-correlation gaps are filled only this close to measured data (grid
+# steps): a band's lost strip is a few steps wide, wider holes stay empty.
+MAX_GAP_FILL_DISTANCE_GRID = 4.0
+
+
+def fill_displacement_gaps(
+    u: np.ndarray, v: np.ndarray, lost: np.ndarray, max_distance_grid: float = MAX_GAP_FILL_DISTANCE_GRID,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Fill narrow lost-correlation gaps in the displacement from the measured points around them.
+
+    Inside an active shear band the grains rearrange between photos, so DIC
+    loses exactly the points on the band, and strain there is undefined.
+    The soil on both sides is still measured, and the difference between
+    the sides is the band's slip; interpolating the *displacement* across
+    the gap (harmonic, i.e. the smoothest field matching both sides) puts
+    that slip back into the strain field, so a band is not cut where it is
+    most active. The strain inside the filled strip is spread over the
+    strip's width, so a band's width there is an upper bound; callers flag
+    it (returned mask).
+
+    lost: points that are soil (tracked before) but have no displacement
+    now. Only those within max_distance_grid of measured points are filled.
+    Returns (u_filled, v_filled, filled_mask).
+    """
+    measured = np.isfinite(u) & np.isfinite(v)
+    if not lost.any() or not measured.any():
+        return u, v, np.zeros(u.shape, dtype=bool)
+    distance = ndimage.distance_transform_edt(~measured)
+    target = lost & ~measured & (distance <= max_distance_grid)
+    if not target.any():
+        return u, v, target
+    from scipy.sparse import coo_matrix
+    from scipy.sparse.linalg import spsolve
+    index = -np.ones(u.shape, dtype=int)
+    rows_t, cols_t = np.nonzero(target)
+    index[rows_t, cols_t] = np.arange(len(rows_t))
+    i_list, j_list, values = [], [], []
+    rhs_u = np.zeros(len(rows_t))
+    rhs_v = np.zeros(len(rows_t))
+    for dr, dc in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+        r, c = rows_t + dr, cols_t + dc
+        inside = (r >= 0) & (r < u.shape[0]) & (c >= 0) & (c < u.shape[1])
+        k = np.flatnonzero(inside)
+        rr, cc = r[k], c[k]
+        unknown = index[rr, cc] >= 0
+        known = measured[rr, cc]
+        # Each neighbour that is unknown or measured contributes to the discrete Laplacian;
+        # neighbours with no data at all (air, wall) are left out (a free edge).
+        use = unknown | known
+        i_list.append(k[use]); j_list.append(k[use]); values.append(np.ones(use.sum()))
+        i_list.append(k[unknown]); j_list.append(index[rr[unknown], cc[unknown]]); values.append(-np.ones(unknown.sum()))
+        np.add.at(rhs_u, k[known], u[rr[known], cc[known]])
+        np.add.at(rhs_v, k[known], v[rr[known], cc[known]])
+    n = len(rows_t)
+    matrix = coo_matrix((np.concatenate(values), (np.concatenate(i_list), np.concatenate(j_list))), shape=(n, n)).tocsr()
+    # Unknowns with no usable neighbour at all would make the system singular; pin them weakly.
+    matrix = matrix + coo_matrix((np.full(n, 1e-9), (np.arange(n), np.arange(n))), shape=(n, n)).tocsr()
+    u_new, v_new = u.copy(), v.copy()
+    u_new[rows_t, cols_t] = spsolve(matrix, rhs_u)
+    v_new[rows_t, cols_t] = spsolve(matrix, rhs_v)
+    return u_new, v_new, target

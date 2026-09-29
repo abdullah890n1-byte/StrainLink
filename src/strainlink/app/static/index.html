@@ -61,16 +61,21 @@
         <div class="dropzone" id="dropzone">
           <div class="dz-icon">⬇︎</div>
           <div><b>Drop your test folder here</b></div>
-          <div class="muted small">or</div>
+          <div class="muted small">(photos, or a video of the test) · or</div>
           <button class="primary" id="pick-folder">Choose test folder…</button>
         </div>
         <div id="found" class="hidden">
           <div class="found-list">
-            <div class="found-item" id="found-photos"><span class="st"></span><div class="what"><b>Photos</b><span class="detail"></span></div><button class="small" data-change="photos">Change…</button></div>
+            <div class="found-item" id="found-photos"><span class="st"></span><div class="what"><b>Photos or video</b><span class="detail"></span></div><button class="small" data-change="photos">Photos…</button><button class="small" data-change="video">Video…</button></div>
             <div class="found-item" id="found-logger"><span class="st"></span><div class="what"><b>Data-logger file</b><span class="detail"></span></div><button class="small" data-change="logger">Change…</button></div>
             <div class="found-item" id="found-cal"><span class="st"></span><div class="what"><b>Calibration run</b> <span class="muted small">(optional: removes base friction)</span><span class="detail"></span></div><button class="small" data-change="cal">Change…</button></div>
           </div>
           <div class="thumbs hidden" id="thumbs"><figure><img id="thumb-first"><figcaption id="cap-first"></figcaption></figure><figure><img id="thumb-last"><figcaption id="cap-last"></figcaption></figure></div>
+          <div id="video-box" class="notice hidden">
+            <b>Frames taken from the video</b>
+            <div class="row"><label class="inline">One frame every <input type="number" id="video-every" min="0" step="any"> seconds</label> <span id="video-note" class="muted small"></span></div>
+            <p class="muted small">Closer frames keep the sand grains in a shear band trackable; farther apart is faster. The automatic choice keeps up to 200 frames.</p>
+          </div>
           <div id="interval-box" class="notice hidden">
             <b>How often were the photos taken?</b> The photos carry no camera time stamps.
             <div class="row"><label class="inline">One photo every <input type="number" id="interval" min="0" step="any" placeholder="5"> seconds</label></div>

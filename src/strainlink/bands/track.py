@@ -63,6 +63,7 @@ class PrimaryHistory:
     heave_mm: np.ndarray
     width_mm: np.ndarray
     reached_surface: np.ndarray
+    surface_confirmed: np.ndarray   # reached, with the band traced right up to the top of the data
     shape: list[str]
     needs_review: np.ndarray
 
@@ -73,6 +74,20 @@ class PrimaryHistory:
     @property
     def surface_reached_mm(self) -> float:
         return _confirmed_onset(self.delta_mm, self.reached_surface)
+
+    @property
+    def surface_reached_range_mm(self) -> tuple[float, float]:
+        """Earliest and latest push at which band-1 can have reached the surface.
+
+        From the first photo where the tip enters the unresolvable top zone,
+        to the first photo where it is confirmed at the top of the data (or
+        the end of the test, if it never is).
+        """
+        first = self.surface_reached_mm
+        if not np.isfinite(first):
+            return float("nan"), float("nan")
+        confirmed = _confirmed_onset(self.delta_mm, self.surface_confirmed)
+        return first, confirmed if np.isfinite(confirmed) else float(self.delta_mm[-1])
 
 
 @dataclass
@@ -114,6 +129,7 @@ def _primary_history(frames: list[FrameBands], delta: np.ndarray) -> PrimaryHist
         "length_mm", "area_mm2", "heave_mm", "width_mm")}
     detected = np.zeros(n, dtype=bool)
     reached = np.zeros(n, dtype=bool)
+    confirmed = np.zeros(n, dtype=bool)
     review = np.zeros(n, dtype=bool)
     shapes = [""] * n
     for k, frame in enumerate(frames):
@@ -124,6 +140,7 @@ def _primary_history(frames: list[FrameBands], delta: np.ndarray) -> PrimaryHist
         p = frame.primary
         detected[k] = True
         reached[k] = band.reached_end
+        confirmed[k] = band.reached_end and "surface-reach-unconfirmed" not in p.flags
         shapes[k] = p.shape.label + ("?" if p.shape.ambiguous else "")
         columns["developed_length_mm"][k] = p.developed_length_mm
         columns["tip_x_mm"][k], columns["tip_z_mm"][k] = band.tip
@@ -133,7 +150,7 @@ def _primary_history(frames: list[FrameBands], delta: np.ndarray) -> PrimaryHist
         columns["area_mm2"][k] = p.area_mm2
         columns["heave_mm"][k] = p.heave_mm
         columns["width_mm"][k] = band.width_mm
-    return PrimaryHistory(delta_mm=delta, detected=detected, reached_surface=reached,
+    return PrimaryHistory(delta_mm=delta, detected=detected, reached_surface=reached, surface_confirmed=confirmed,
                           shape=shapes, needs_review=review, **columns)
 
 
