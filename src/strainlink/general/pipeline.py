@@ -1,0 +1,441 @@
+"""The complete analysis for any test: photos/video (+ an optional logger) -> fields, zones, findings.
+
+Project file (kind "general"):
+
+    {"kind": "general", "name": ...,
+     "images": {"folder": ..., "interval_s": optional, "video": optional},
+     "calibration": {"mm_per_px": s, "roi_px": [x0, y0, x1, y1] optional},
+     "sensors": {"file": ..., "channels": [...]} optional,
+     "sync": {"mode": "auto" | "offset", "offset_s": s} optional,
+     "dic": {...} optional}
+
+Results are written like the retaining-wall pipeline's (summary.json,
+fields.npz, bands.json, per_photo.csv), with summary["kind"] == "general".
+
+Coordinates: mm, x to the right, z up, origin at the photo's bottom-left.
+"""
+
+from __future__ import annotations
+
+import json
+import time
+from dataclasses import asdict
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+from scipy import ndimage, optimize
+
+from .. import __version__, correlate
+from ..bands import DetectionSettings, detect_bands
+from ..bands.track import BandTrack, _secondary_tracks
+from ..calib import WallFrame
+from ..dic import DICSettings, Grid, track_sequence
+from ..io.images import load_sequence
+from ..io.sensors import Channel
+from ..pipeline import (LazyImages, Progress, ProjectError, _clean, _json_default, _load_sensor_files, _resolve,
+                        load_project)
+from ..strain import compute_strain, fill_displacement_gaps
+from .events import MODE_NAMES, channel_events, zone_events
+from .region import object_mask
+from .zones import kinematics
+
+STAGES = ("Loading", "Measuring movement (DIC)", "Strain and localisation zones", "Reading sensors",
+          "Matching clocks", "Correlation engine", "Saving results")
+# DIC defaults for any object: 31 px subsets on a 5 px grid, searching ±10 px
+# around the previous photo's motion.
+DEFAULT_SUBSET_RADIUS_PX = 15
+DEFAULT_STEP_PX = 5
+DEFAULT_SEARCH_RADIUS_PX = 10
+DEFAULT_STRAIN_WINDOW = 5
+# Zone detection scaled to the object: widest zone and shortest zone as
+# fractions of the object's smaller dimension.
+MAX_ZONE_WIDTH_FRACTION = 0.25
+MIN_ZONE_LENGTH_FRACTION = 0.1
+# A zone "runs across the object" when both ends are within this many zone
+# widths of the object's outline.
+THROUGH_WIDTHS = 2.0
+# Share of the object at each end used for the virtual extensometers.
+EXTENSOMETER_END_FRACTION = 0.05
+# Logger records are thinned to at most this many samples for event detection.
+MAX_EVENT_SAMPLES = 5000
+# Clock offsets searched (as a fraction of the logger duration) and the fit's resolution.
+OFFSET_SEARCH_STEPS = 400
+
+
+def image_frame(mm_per_px: float, shape: tuple[int, int]) -> WallFrame:
+    """Photo pixels <-> mm (x right, z up, origin bottom-left); WallFrame is used as a plain image frame."""
+    return WallFrame(mm_per_px=mm_per_px, toe_col=0.0, toe_row=float(shape[0]), wall_height_mm=shape[0] * mm_per_px)
+
+
+def run(project_path: str | Path, progress: Progress | None = None) -> dict:
+    started = time.perf_counter()
+    report = progress or (lambda stage, fraction, message: None)
+    project = load_project(project_path)
+    out_dir = Path(project["_dir"]) / "results"
+    out_dir.mkdir(exist_ok=True)
+
+    # 1. Photos, scale and the object's area.
+    report(STAGES[0], 0.0, "Reading photos")
+    try:
+        mm_per_px = float(project["calibration"]["mm_per_px"])
+    except (KeyError, TypeError, ValueError) as error:
+        raise ProjectError("The scale is not set. Complete the Scale step.") from error
+    images_cfg = project.get("images", {})
+    try:
+        sequence = load_sequence(_resolve(project, images_cfg.get("folder", "images")), images_cfg.get("interval_s"))
+    except FileNotFoundError as error:
+        raise ProjectError(f"No photos found: {error}. Choose the photos or video in the first step.") from error
+    if len(sequence) < 2:
+        raise ProjectError("At least two photos are needed (the first must show the object before loading).")
+    images = LazyImages(sequence.paths)
+    frame = image_frame(mm_per_px, images.shape)
+    roi = project["calibration"].get("roi_px")
+    try:
+        mask = object_mask(images[0], tuple(int(v) for v in roi) if roi else None)
+    except ValueError as error:
+        raise ProjectError(f"{error}.") from error
+
+    # 2. DIC over the object only.
+    dic_cfg = project.get("dic", {})
+    settings = DICSettings(subset_radius=int(dic_cfg.get("subset_radius_px", DEFAULT_SUBSET_RADIUS_PX)),
+                           step=int(dic_cfg.get("step_px", DEFAULT_STEP_PX)),
+                           search_radius=int(dic_cfg.get("search_radius_px", DEFAULT_SEARCH_RADIUS_PX)),
+                           reference_mode="incremental", update_every=1)
+    rows, cols = np.nonzero(mask)
+    box = (int(cols.min()), int(rows.min()), int(cols.max()) + 1, int(rows.max()) + 1)
+    grid = Grid.over_roi(box, settings.step, settings.subset_radius)
+    # Subsets must lie on the object: centres at least half a subset inside its outline.
+    inner = ndimage.binary_erosion(mask, iterations=max(settings.subset_radius // 2, 1))
+    inside = inner[np.clip(grid.y.astype(int), 0, mask.shape[0] - 1), np.clip(grid.x.astype(int), 0, mask.shape[1] - 1)]
+    if inside.sum() < 25:
+        raise ProjectError("The object is too small for DIC at this subset size. Use closer photos or a smaller subset.")
+    grid = Grid(x=np.where(inside, grid.x, np.nan), y=np.where(inside, grid.y, np.nan))
+    tracked = track_sequence(images, grid, settings,
+                             progress=lambda k, n: report(STAGES[1], k / n, f"Photo {k + 1} of {n + 1}"))
+    gx = np.arange(grid.shape[1]) * settings.step + box[0] + settings.subset_radius
+    gy = np.arange(grid.shape[0]) * settings.step + box[1] + settings.subset_radius
+    x_mm, z_mm = frame.to_wall(*np.meshgrid(gx, gy))
+    spacing = settings.step * mm_per_px
+
+    # 3. Strain and localisation zones, photo by photo.
+    n = len(images)
+    size_mm = min(np.ptp(x_mm[inside.reshape(grid.shape)]), np.ptp(z_mm[inside.reshape(grid.shape)]))
+    det = DetectionSettings(**{"min_width_mm": 2.0 * spacing, "max_width_mm": MAX_ZONE_WIDTH_FRACTION * size_mm,
+                               "min_length_mm": MIN_ZONE_LENGTH_FRACTION * size_mm, "attach_tolerance_mm": 0.0,
+                               **project.get("detection", {})})
+    fields = {k: np.full((n,) + grid.shape, np.nan) for k in ("ux", "uz", "gamma", "exx", "ezz", "exz", "e1")}
+    per_frame, kin = [], []
+    for k in range(n):
+        report(STAGES[2], k / n, f"Photo {k + 1} of {n}")
+        ux, uz = frame.displacement_to_wall(tracked.field(k, "u"), tracked.field(k, "v"))
+        fields["ux"][k], fields["uz"][k] = ux, uz
+        if k == 0:
+            for name in ("gamma", "exx", "ezz", "exz", "e1"):
+                fields[name][k] = np.where(inside.reshape(grid.shape), 0.0, np.nan)
+            per_frame.append(detect_bands(np.zeros(grid.shape), x_mm, z_mm, None, det))
+            kin.append({})
+            continue
+        lost = (tracked.valid[1:k + 1].any(axis=0) & ~tracked.valid[k]).reshape(grid.shape)
+        ux_f, uz_f, refilled = fill_displacement_gaps(ux, uz, lost)
+        strain = compute_strain(ux_f, uz_f, spacing, -spacing, int(dic_cfg.get("strain_window", DEFAULT_STRAIN_WINDOW)))
+        fields["gamma"][k], fields["e1"][k] = strain.gamma_max, strain.e1
+        fields["exx"][k], fields["ezz"][k], fields["exz"][k] = strain.exx, strain.eyy, strain.exy
+        found = detect_bands(strain.gamma_max, x_mm, z_mm, None, det, uz=uz_f, reconstructed=refilled)
+        per_frame.append(found)
+        kin.append({id(b): kinematics(b, x_mm, z_mm, ux_f, uz_f) for b in found.bands})
+
+    # 4. Timing and the common axis.
+    report(STAGES[3], 0.0, "Reading the logger")
+    table = None
+    if project.get("sensors", {}).get("file"):
+        table, _ = _load_sensor_files(project)
+        if table.time_s is None:
+            raise ProjectError(f"No time column found in {table.path.name}. Assign it in the first step.")
+        _all_columns(table, confirmed="channels" in project["sensors"])
+    report(STAGES[4], 0.0, "Matching photos to the logger clock")
+    ext = _extensometers(fields["ux"], fields["uz"], x_mm, z_mm)
+    timing = _timing(project, sequence.times_s, table, ext)
+    timing["sync"]["photo_time_source"] = sequence.time_source
+    axis_values = timing["axis"]
+    tracks = _secondary_tracks(per_frame, axis_values)
+    modes, series, crossing = _zone_summaries(tracks, per_frame, kin, x_mm, z_mm, inside.reshape(grid.shape), n, spacing)
+
+    # 5. Per-photo table and correlation.
+    report(STAGES[5], 0.0, "Finding and testing relationships")
+    frames = pd.DataFrame({"photo": np.arange(1, n + 1), "time_s": sequence.times_s, timing["axis_label"]: axis_values})
+    obj_cols = []
+    for label, values in _object_series(fields, ext, per_frame).items():
+        frames[label] = values
+        obj_cols.append(label)
+    for name, values in series.items():
+        frames[name] = values
+        obj_cols.append(name)
+    sensor_cols, s_events = [], []
+    if table is not None:
+        for channel in table.channels:
+            if channel.role in ("time", "ignore"):
+                continue
+            values = table.values(channel)
+            frames[channel.name] = np.interp(timing["logger_time_at_frames"], table.time_s, values, left=np.nan, right=np.nan)
+            sensor_cols.append(channel.name)
+            if channel.name != timing.get("axis_channel"):
+                s_events += channel_events(channel.name, *_on_axis(timing, table, values), timing["event_sigma"])
+    frame_sigma = 0.5 * float(np.nanmedian(np.abs(np.diff(axis_values)))) if n > 1 else 0.0
+    o_events = zone_events(tracks, modes, crossing, max(frame_sigma, timing["axis_sigma"]))
+    axis_words = (timing["axis_name"], timing["axis_unit"])
+    findings = correlate.coincidences(s_events, o_events, axis_words)
+    warnings = []
+    # The loading axis itself is left out of screening: everything the object does changes with it.
+    screened = [c for c in sensor_cols if c != timing.get("axis_channel")]
+    if len(frames) >= correlate.MIN_FRAMES_FOR_SCREENING and screened:
+        findings += correlate.screen(frames, screened, obj_cols)
+    elif sensor_cols:
+        warnings.append(f"Only {len(frames)} photos: continuous screening needs at least "
+                        f"{correlate.MIN_FRAMES_FOR_SCREENING}.")
+    if table is None:
+        warnings.append("No logger file: object behaviour is described, but there are no sensor records to correlate with.")
+
+    # 6. Save.
+    report(STAGES[6], 0.0, "Writing results")
+    np.savez_compressed(out_dir / "fields.npz", x_mm=x_mm, z_mm=z_mm, push_mm=axis_values,
+                        valid=tracked.valid.reshape((n,) + grid.shape), **fields)
+    (out_dir / "bands.json").write_text(json.dumps(_clean([
+        [{"name": _track_name(tracks, k, b), "label": "zone", "mode": kin[k][id(b)].mode if id(b) in kin[k] else "",
+          "points": b.points.round(3), "width_mm": b.width_mm, "flags": b.flags} for b in fb.bands]
+        for k, fb in enumerate(per_frame)]), default=_json_default))
+    frames.to_csv(out_dir / "per_photo.csv", index=False)
+    summary = _clean({
+        "kind": "general", "project": project.get("name", Path(project_path).stem),
+        "synthetic": bool(project.get("synthetic", False)), "version": __version__,
+        "finished": time.strftime("%Y-%m-%d %H:%M:%S"), "seconds": time.perf_counter() - started, "frames": n,
+        "frame_push_mm": axis_values, "axis": {"name": timing["axis_name"], "unit": timing["axis_unit"],
+                                              "label": timing["axis_label"]},
+        "frame": {"mm_per_px": mm_per_px, "height_px": images.shape[0], "width_px": images.shape[1]},
+        "area": {"points": int(inside.sum()), "size_mm": [float(np.ptp(x_mm[inside.reshape(grid.shape)])),
+                                                           float(np.ptp(z_mm[inside.reshape(grid.shape)]))]},
+        "sync": timing["sync"],
+        "zones": [{"name": t.name, "mode": modes.get(t.name, ""), "onset": t.onset_mm, "through": crossing.get(t.name),
+                   "push_mm": t.delta_mm, "length_mm": [b.length_mm for b in t.bands],
+                   "width_mm": [b.width_mm for b in t.bands]} for t in tracks],
+        "object_columns": obj_cols, "sensor_columns": sorted(sensor_cols, key=lambda c: c == timing.get("axis_channel")),
+        "correlation": {"findings": [f.as_dict() for f in correlate.ranked(findings)],
+                        "events": [asdict(e) for e in s_events + o_events], "warnings": warnings},
+        "flags": _flags(per_frame, timing, sequence.time_source),
+    })
+    (out_dir / "summary.json").write_text(json.dumps(summary, indent=1, default=_json_default))
+    report(STAGES[6], 1.0, "Done")
+    return summary
+
+
+# --- stages ------------------------------------------------------------------
+
+def _all_columns(table, confirmed: bool) -> None:
+    """Any test: every logger column takes part, under its own name.
+
+    The automatic guesser names channels for retaining-wall tests ("Force",
+    "PT3"); for any other test the file's own headers are clearer, and
+    columns it did not recognise (temperature, strain gauges, ...) are
+    still records worth correlating. A mapping the user confirmed is kept.
+    """
+    if confirmed:
+        return
+    for channel in table.channels:
+        if channel.role != "time":
+            channel.name = channel.column
+    for column in table.unmapped:
+        values = pd.to_numeric(table.frame[column], errors="coerce")
+        if values.notna().mean() > 0.9:
+            table.channels.append(Channel(column=column, role="other", unit="", factor=1.0, name=column, confidence=0.0))
+    table.unmapped = []
+
+
+def _extensometers(ux: np.ndarray, uz: np.ndarray, x: np.ndarray, z: np.ndarray) -> dict[str, np.ndarray]:
+    """Virtual extensometers across the whole object: change in width (x) and height (z), mm."""
+    out = {}
+    for label, u, coord in (("stretch x (mm)", ux, x), ("stretch z (mm)", uz, z)):
+        values = []
+        for k in range(len(u)):
+            ok = np.isfinite(u[k])
+            if ok.sum() < 10:
+                values.append(np.nan)
+                continue
+            lo, hi = np.quantile(coord[ok], [EXTENSOMETER_END_FRACTION, 1 - EXTENSOMETER_END_FRACTION])
+            values.append(float(np.mean(u[k][ok & (coord >= hi)]) - np.mean(u[k][ok & (coord <= lo)])))
+        out[label] = np.array(values)
+    return out
+
+
+def _timing(project: dict, frame_times: np.ndarray, table, ext: dict) -> dict:
+    """Common axis for events and charts, and each photo's time on the logger clock."""
+    base = {"axis": frame_times - frame_times[0], "axis_name": "time", "axis_unit": "s", "axis_label": "time (s)",
+            "axis_sigma": 0.0, "event_sigma": 0.0, "logger_time_at_frames": frame_times - frame_times[0],
+            "offset_s": 0.0, "sync": {"source": "photos only"}}
+    if table is None:
+        return base
+    cfg = project.get("sync", {})
+    disp = next(iter(table.by_role("displacement")), None)
+    mode = cfg.get("mode", "auto" if disp is not None else "offset")
+    logger_t = table.time_s
+    step = float(np.nanmedian(np.diff(logger_t))) if len(logger_t) > 1 else 0.0
+    if mode == "offset" or disp is None:
+        offset, sigma, source = float(cfg.get("offset_s", 0.0)), 0.0, "user" if "offset_s" in cfg else "assumed"
+    else:
+        dic = max(ext.values(), key=lambda v: np.nanmax(np.abs(v)) if np.isfinite(v).any() else 0.0)
+        offset, sigma = _fit_offset(frame_times - frame_times[0], dic, logger_t, table.values(disp))
+        source = "dic"
+    at_frames = frame_times - frame_times[0] + offset
+    sync = {"source": source, "clock_offset_s": offset, "offset_sigma_s": sigma, "logger_step_s": step}
+    if disp is not None:
+        axis = np.interp(at_frames, logger_t, table.values(disp), left=np.nan, right=np.nan)
+        slope = np.nanmedian(np.abs(np.gradient(table.values(disp), logger_t))) if len(logger_t) > 2 else 0.0
+        unit = disp.unit or "mm"
+        label = disp.name if f"({unit.lower()})" in disp.name.lower() else f"{disp.name} ({unit})"
+        return {**base, "axis": axis, "axis_name": disp.name, "axis_unit": unit, "axis_label": label, "axis_sigma": float(slope * sigma),
+                "event_sigma": float(max(slope * max(step, sigma), 1e-9)), "logger_time_at_frames": at_frames,
+                "offset_s": offset, "axis_channel": disp.name, "sync": sync}
+    return {**base, "axis": at_frames - offset, "axis_sigma": sigma, "event_sigma": max(step, sigma),
+            "logger_time_at_frames": at_frames, "offset_s": offset, "sync": sync}
+
+
+def _fit_offset(frame_t: np.ndarray, dic: np.ndarray, logger_t: np.ndarray, disp: np.ndarray) -> tuple[float, float]:
+    """Logger time of the first photo, from DIC stretch = a * (logger displacement - its value at the first photo).
+
+    DIC measures movement relative to the first photo, so the logger's
+    displacement is taken relative to its value at the first photo too
+    (no free intercept). Scale-free (a is fitted), so it works whatever the
+    specimen's compliance. Timing information comes only from changes in
+    the loading rate (start, stops, unloading): during constant-rate loading
+    any clock shift fits equally well. The uncertainty is therefore the
+    half-width of the range of offsets that fit statistically as well as the
+    best one, combined with the first/second-half disagreement.
+    """
+    ok = np.isfinite(dic)
+    if ok.sum() < 5 or np.ptp(dic[ok]) == 0:
+        return 0.0, float("nan")
+    duration = float(logger_t[-1] - logger_t[0])
+
+    def cost(offset: float, sel: np.ndarray = ok) -> float:
+        d = np.interp(frame_t[sel] + offset, logger_t, disp, left=np.nan, right=np.nan)
+        d0 = np.interp(frame_t[0] + offset, logger_t, disp, left=np.nan, right=np.nan)
+        rel = d - d0
+        good = np.isfinite(rel)
+        if good.sum() < max(5, 0.8 * sel.sum()) or not np.any(rel[good]):
+            return np.inf
+        y = dic[sel][good]
+        a = float(rel[good] @ y / (rel[good] @ rel[good]))
+        return float(np.mean((y - a * rel[good]) ** 2))
+
+    grid = np.linspace(logger_t[0] - frame_t[0], logger_t[-1] - frame_t[-1], OFFSET_SEARCH_STEPS)
+    if grid[-1] <= grid[0]:
+        grid = np.linspace(-duration, duration, OFFSET_SEARCH_STEPS)
+
+    def best(sel: np.ndarray) -> tuple[float, np.ndarray]:
+        costs = np.array([cost(o, sel) for o in grid])
+        o0 = grid[int(np.argmin(costs))]
+        width = (grid[1] - grid[0]) if len(grid) > 1 else 1.0
+        refined = optimize.minimize_scalar(lambda o: cost(o, sel), bounds=(o0 - width, o0 + width), method="bounded").x
+        return float(refined), costs
+
+    offset, costs = best(ok)
+    # Offsets whose fit is statistically as good (within 1/n of the best mean squared residual).
+    finite = np.isfinite(costs)
+    minimum = float(np.min(costs[finite])) if finite.any() else np.inf
+    equal = grid[finite & (costs <= minimum * (1.0 + 1.0 / ok.sum()) + 1e-15)]
+    flatness = 0.5 * float(equal.max() - equal.min()) if len(equal) else 0.0
+    idx = np.flatnonzero(ok)
+    first, second = np.zeros_like(ok), np.zeros_like(ok)
+    first[idx[: len(idx) // 2]], second[idx[len(idx) // 2:]] = True, True
+    halves = [best(h)[0] for h in (first, second) if h.sum() >= 5]
+    spread = 0.5 * abs(halves[0] - halves[1]) if len(halves) == 2 else 0.0
+    frame_step = float(np.median(np.diff(frame_t))) if len(frame_t) > 1 else 0.0
+    return offset, float(max(flatness, spread, 0.1 * frame_step))
+
+
+def _on_axis(timing: dict, table, values: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """A logger channel placed on the common axis (thinned for event detection).
+
+    The axis is the loading displacement channel if there is one, else the
+    time since the first photo.
+    """
+    stride = max(len(values) // MAX_EVENT_SAMPLES, 1)
+    v = values[::stride]
+    if "axis_channel" in timing:
+        axis_channel = next(c for c in table.channels if c.name == timing["axis_channel"])
+        return table.values(axis_channel)[::stride], v
+    return table.time_s[::stride] - timing["offset_s"], v
+
+
+def _zone_summaries(tracks: list[BandTrack], per_frame, kin, x, z, inside, n, spacing):
+    """Per zone: its dominant mode, series per photo, and when it first runs across the object."""
+    # Padded: the edge of the grid is outline too (the object may fill its whole box).
+    outline_distance = ndimage.distance_transform_edt(np.pad(inside, 1))[1:-1, 1:-1] * spacing
+    x0, dx, z0, dz = x[0, 0], x[0, 1] - x[0, 0], z[0, 0], z[1, 0] - z[0, 0]
+    modes, series, crossing = {}, {}, {}
+    for t in tracks:
+        found = [kin[k][id(b)] for k, b in zip(t.frames, t.bands) if id(b) in kin[k]]
+        if found:
+            votes = [f.mode for f in found[-max(len(found) // 2, 1):]]
+            modes[t.name] = max(set(votes), key=votes.count)
+        length = np.full(n, np.nan)
+        opening = np.full(n, np.nan)
+        slip = np.full(n, np.nan)
+        for k, b in zip(t.frames, t.bands):
+            length[k] = b.length_mm
+            if id(b) in kin[k]:
+                opening[k], slip[k] = kin[k][id(b)].opening_mm, kin[k][id(b)].slip_mm
+            ends = b.points[[0, -1]]
+            r = np.clip(np.round((ends[:, 1] - z0) / dz).astype(int), 0, inside.shape[0] - 1)
+            c = np.clip(np.round((ends[:, 0] - x0) / dx).astype(int), 0, inside.shape[1] - 1)
+            if t.name not in crossing and np.all(outline_distance[r, c] <= THROUGH_WIDTHS * b.width_mm):
+                crossing[t.name] = t.delta_mm[t.frames.index(k)]
+        series[f"{t.name} length (mm)"] = length
+        series[f"{t.name} {'opening' if modes.get(t.name) != 'shear' else 'slip'} (mm)"] = (
+            opening if modes.get(t.name) != "shear" else slip)
+    return modes, series, crossing
+
+
+def _object_series(fields: dict, ext: dict, per_frame) -> dict[str, np.ndarray]:
+    """Whole-object measures per photo: typical strain (a virtual strain gauge), extensometers, peak strains."""
+    def over_object(name: str, how) -> np.ndarray:
+        return np.array([how(f[np.isfinite(f)]) if np.isfinite(f).any() else np.nan for f in fields[name]])
+    # Median, not mean: it is the strain of the intact material. A zone's own
+    # jump (reported separately as its opening or slip) would dominate a mean.
+    return {
+        "strain εxx": over_object("exx", np.median),
+        "strain εzz": over_object("ezz", np.median),
+        "shear strain εxz": over_object("exz", np.median),
+        "peak shear strain γmax": over_object("gamma", lambda v: np.percentile(v, 99)),
+        "peak major strain ε1": over_object("e1", lambda v: np.percentile(v, 99)),
+        **ext,
+        "zones": np.array([len(fb.bands) for fb in per_frame], dtype=float),
+    }
+
+
+def _track_name(tracks: list[BandTrack], k: int, band) -> str:
+    for t in tracks:
+        for kk, b in zip(t.frames, t.bands):
+            if kk == k and b is band:
+                return t.name
+    return ""
+
+
+def _flags(per_frame, timing: dict, time_source: str) -> list[str]:
+    flags = []
+    if time_source == "file-time":
+        flags.append("Photo times come from file modification times (least reliable). Prefer camera times, a video, "
+                     "or the photo interval.")
+    sync = timing["sync"]
+    if sync.get("source") == "assumed":
+        flags.append("The logger has no displacement channel and no clock offset was given: the first photo is assumed "
+                     "to be at logger time 0. Enter the offset if it is known.")
+    if sync.get("source") == "dic" and np.isfinite(sync.get("offset_sigma_s", np.nan)):
+        step = sync.get("logger_step_s", 0.0)
+        frame_gap = float(np.nanmedian(np.diff(timing["logger_time_at_frames"]))) if len(timing["logger_time_at_frames"]) > 1 else 0.0
+        if frame_gap and sync["offset_sigma_s"] > 0.5 * frame_gap:
+            flags.append(f"Photos are matched to the logger only within ±{sync['offset_sigma_s']:.2f} s "
+                         f"(photos are {frame_gap:.2f} s apart).")
+    review = sum(1 for fb in per_frame if any(b.flags for b in fb.bands))
+    if review:
+        flags.append(f"{review} photo(s) have zone measurements flagged for review.")
+    return flags

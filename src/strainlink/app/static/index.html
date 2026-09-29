@@ -21,8 +21,8 @@
   <!-- HOME -->
   <section id="view-home" class="view">
     <div class="hero">
-      <h1>Analyse a soil model test</h1>
-      <p class="lead">Photos and sensor logs in — shear bands, engineering results and evidence-backed findings out. Every number comes with its uncertainty, and anything uncertain is flagged for you.</p>
+      <h1>Analyse a deformation test</h1>
+      <p class="lead">Soil model tests or any object. Photos or video and sensor logs in — movement, strain, cracks and shear bands, engineering results and evidence-backed findings out. Every number comes with its uncertainty, and anything uncertain is flagged for you.</p>
     </div>
     <div class="actions">
       <button class="action" id="btn-new">
@@ -32,9 +32,9 @@
         <span class="icon">↗</span><span class="t">Open analysis</span><span class="d">Continue or review a saved StrainLink project.</span>
       </button>
       <div class="action demo">
-        <span class="icon">▶</span><span class="t">Try a demo</span><span class="d">A synthetic test with known answers. First run takes a few minutes.</span>
+        <span class="icon">▶</span><span class="t">Try a demo</span><span class="d">A synthetic test with known answers: a retaining-wall test in sand, or any object (a plate that cracks). First run takes a few minutes.</span>
         <div class="segmented" id="demo-choice">
-          <button data-preset="loose">Loose sand</button><button data-preset="medium" class="on">Medium</button><button data-preset="dense">Dense</button>
+          <button data-preset="loose">Loose sand</button><button data-preset="medium" class="on">Medium</button><button data-preset="dense">Dense</button><button data-preset="crack" title="Any-object mode: a speckled plate stretched until it cracks">Cracking plate</button>
         </div>
         <button class="primary small" id="btn-demo">Run demo</button>
       </div>
@@ -57,7 +57,14 @@
       <!-- step 0: files -->
       <div class="step" data-step="0">
         <h2>Your test files</h2>
-        <p class="muted">Choose the folder of your test. StrainLink finds the photos, the data-logger file and the calibration run inside it.</p>
+        <div class="kind-choice">
+          <span class="muted small">What are you testing?</span>
+          <div class="segmented" id="kind-choice">
+            <button data-kind="wall" class="on">Retaining-wall model test</button><button data-kind="general">Any object or test</button>
+          </div>
+        </div>
+        <p class="muted wall-only">Choose the folder of your test. StrainLink finds the photos, the data-logger file and the calibration run inside it.</p>
+        <p class="muted general-only">Choose the folder of your test: photos or a video of the object, and (optional) the data-logger file. Any material, any loading: StrainLink measures the movement and strain, finds cracks and shear bands, and links them to your sensor records.</p>
         <div class="dropzone" id="dropzone">
           <div class="dz-icon">⬇︎</div>
           <div><b>Drop your test folder here</b></div>
@@ -67,8 +74,8 @@
         <div id="found" class="hidden">
           <div class="found-list">
             <div class="found-item" id="found-photos"><span class="st"></span><div class="what"><b>Photos or video</b><span class="detail"></span></div><button class="small" data-change="photos">Photos…</button><button class="small" data-change="video">Video…</button></div>
-            <div class="found-item" id="found-logger"><span class="st"></span><div class="what"><b>Data-logger file</b><span class="detail"></span></div><button class="small" data-change="logger">Change…</button></div>
-            <div class="found-item" id="found-cal"><span class="st"></span><div class="what"><b>Calibration run</b> <span class="muted small">(optional: removes base friction)</span><span class="detail"></span></div><button class="small" data-change="cal">Change…</button></div>
+            <div class="found-item" id="found-logger"><span class="st"></span><div class="what"><b>Data-logger file</b> <span class="muted small general-only">(optional: load, displacement, any sensors)</span><span class="detail"></span></div><button class="small" data-change="logger">Change…</button></div>
+            <div class="found-item wall-only" id="found-cal"><span class="st"></span><div class="what"><b>Calibration run</b> <span class="muted small">(optional: removes base friction)</span><span class="detail"></span></div><button class="small" data-change="cal">Change…</button></div>
           </div>
           <div class="thumbs hidden" id="thumbs"><figure><img id="thumb-first"><figcaption id="cap-first"></figcaption></figure><figure><img id="thumb-last"><figcaption id="cap-last"></figcaption></figure></div>
           <div id="video-box" class="notice hidden">
@@ -89,17 +96,22 @@
       </div>
       <!-- step 1: calibrate -->
       <div class="step hidden" data-step="1">
-        <h2>Scale &amp; wall</h2>
-        <p class="muted">Two clicks on the first photo: the ends of something of known length, then the bottom corner of the wall face (the toe).</p>
+        <h2 class="wall-only">Scale &amp; wall</h2>
+        <h2 class="general-only">Scale</h2>
+        <p class="muted wall-only">Two clicks on the first photo: the ends of something of known length, then the bottom corner of the wall face (the toe).</p>
+        <p class="muted general-only">Click the two ends of something of known length on the first photo (a ruler, a grid, the specimen's width), or type the scale.</p>
         <div class="toolbar">
           <button class="tool on" data-tool="scale">① Scale: click two points</button>
           <label class="inline">that are <input type="number" id="scale-mm" value="100" min="0" step="any"> mm apart</label>
-          <button class="tool" data-tool="toe">② Click the wall toe</button>
+          <button class="tool wall-only" data-tool="toe">② Click the wall toe</button>
+          <button class="tool general-only" data-tool="area" title="Only if the automatic outline includes something that is not the object (a ruler, a clamp)">② Limit the area (optional): drag a box</button>
+          <button class="link general-only hidden" id="clear-area">clear box</button>
           <span class="sep"></span>
           <label class="inline muted">or type the scale <input type="number" id="scale-direct" min="0" step="any" placeholder="mm/px"> mm/px</label>
         </div>
         <div class="canvaswrap"><canvas id="cal-canvas"></canvas></div>
-        <div class="row"><label class="inline">Retained soil height at the wall (effective height H) <input type="number" id="wall-h" value="390" min="0" step="any"> mm</label></div>
+        <div class="row wall-only"><label class="inline">Retained soil height at the wall (effective height H) <input type="number" id="wall-h" value="390" min="0" step="any"> mm</label></div>
+        <div class="general-only area-box"><p class="small"><b>Measured area</b> <span class="muted">— found automatically: the textured, in-focus object (outlined). Plain background is left out.</span></p><img id="area-img" alt=""><p id="area-note" class="muted small"></p></div>
         <div class="facts" id="cal-facts"></div>
       </div>
       <!-- step 2: test details -->
@@ -107,18 +119,18 @@
         <h2>Test details</h2>
         <p class="muted small">Filled in from your last test where possible.</p>
         <div class="formgrid">
-          <label>Name of this test <input type="text" id="proj-name" placeholder="e.g. RW-MDS, medium-dense sand"></label>
-          <label>Backfill unit weight γ <span class="unit"><input type="number" id="gamma" step="any" placeholder="e.g. 14.13"> kN/m³</span></label>
-          <label>Wall width (into the page) <span class="unit"><input type="number" id="wall-w" step="any" value="700"> mm</span></label>
-          <label>Wall weight <span class="unit"><input type="number" id="wall-weight" step="any" placeholder="optional"> kN</span><small class="muted">Only needed for the wall friction angle δmob.</small></label>
+          <label class="span-all">Name of this test <input type="text" id="proj-name" placeholder="e.g. RW-MDS, medium-dense sand"></label>
+          <label class="wall-only">Backfill unit weight γ <span class="unit"><input type="number" id="gamma" step="any" placeholder="e.g. 14.13"> kN/m³</span></label>
+          <label class="wall-only">Wall width (into the page) <span class="unit"><input type="number" id="wall-w" step="any" value="700"> mm</span></label>
+          <label class="wall-only">Wall weight <span class="unit"><input type="number" id="wall-weight" step="any" placeholder="optional"> kN</span><small class="muted">Only needed for the wall friction angle δmob.</small></label>
         </div>
-        <h3>Pressure cells <span class="muted small">— depth of each cell below the soil surface</span></h3>
-        <table class="mapping narrow"><thead><tr><th>Cell</th><th>Depth (mm)</th></tr></thead><tbody id="cells-body"></tbody></table>
+        <h3 class="wall-only">Pressure cells <span class="muted small">— depth of each cell below the soil surface</span></h3>
+        <table class="mapping narrow wall-only"><thead><tr><th>Cell</th><th>Depth (mm)</th></tr></thead><tbody id="cells-body"></tbody></table>
         <details class="mapping-box"><summary>Advanced: matching photos to the logger clock</summary>
           <div class="radios">
-            <label><input type="radio" name="sync" value="dic" checked> Automatic <span class="muted">(recommended: from the wall movement seen in the photos)</span></label>
+            <label><input type="radio" name="sync" value="dic" checked> Automatic <span class="muted wall-only">(recommended: from the wall movement seen in the photos)</span><span class="muted general-only">(from the object's stretch in the photos vs the logger's displacement column)</span></label>
             <label><input type="radio" name="sync" value="offset"> I know it: the first photo was taken at <input type="number" id="sync-offset" step="any" class="short"> s on the logger clock</label>
-            <label><input type="radio" name="sync" value="push-step"> A photo was taken every <input type="number" id="sync-step" step="any" class="short"> mm of wall push</label>
+            <label class="wall-only"><input type="radio" name="sync" value="push-step"> A photo was taken every <input type="number" id="sync-step" step="any" class="short"> mm of wall push</label>
           </div>
         </details>
       </div>
@@ -160,9 +172,10 @@
     <div id="res-synthetic" class="synthetic hidden">SYNTHETIC DATA — a generated test with known answers, not a real experiment.</div>
     <div class="cards" id="res-cards"></div>
     <div class="tabs" id="res-tabs">
-      <button data-tab="overview" class="on">Overview</button><button data-tab="soil">Slip surface</button><button data-tab="findings">Findings</button><button data-tab="review">Review <span id="review-count" class="count"></span></button><button data-tab="accuracy" id="tab-accuracy" class="hidden">Accuracy ✓</button>
+      <button data-tab="overview" class="on">Overview</button><button data-tab="soil"><span class="wall-only">Slip surface</span><span class="general-only">Deformation</span></button><button data-tab="findings">Findings</button><button data-tab="review">Review <span id="review-count" class="count"></span></button><button data-tab="accuracy" id="tab-accuracy" class="hidden">Accuracy ✓</button>
     </div>
     <div class="tab" data-tab="overview">
+      <div class="general-only plot-pickers"><label class="inline small">Sensor <select id="pick-sensor"></select></label><label class="inline small">Object <select id="pick-object"></select></label><span class="muted small">Pick any logger channel and any measure of the object; dotted lines mark the events.</span></div>
       <div class="two"><div id="plot-force" class="plot"></div><div id="plot-cells" class="plot"></div></div>
       <div class="scrub"><span class="muted small">Photo</span><input type="range" id="scrub-overview" min="0" value="0"><span id="scrub-overview-label" class="small"></span></div>
     </div>

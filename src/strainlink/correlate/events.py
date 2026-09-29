@@ -18,7 +18,7 @@ import numpy as np
 from ..bands.track import TestBands
 from ..mechanics import MechanicsResults
 
-Source = Literal["sensor", "soil"]
+Source = Literal["sensor", "soil", "object"]
 
 
 @dataclass(frozen=True)
@@ -26,8 +26,8 @@ class Event:
     key: str            # stable identifier, e.g. "PT3.softening"
     label: str          # human-readable, e.g. "PT3 starts to soften"
     source: Source
-    push_mm: float
-    sigma_mm: float     # 1-sigma uncertainty of the push
+    push_mm: float      # position on the test's common axis (wall push in mm; any test: its own axis)
+    sigma_mm: float     # 1-sigma uncertainty, same unit
     subject: str = ""   # channel or band the event belongs to
     phrase: str = ""    # noun phrase for sentences, e.g. "the appearance of R1 (radial band)"
 

@@ -94,8 +94,13 @@ class _Analysis:
             fields = {name: npz[name] for name in npz.files}
         bands = json.loads((folder / "results" / "bands.json").read_text())
         cal = project["calibration"]
-        wall = WallFrame(float(cal["mm_per_px"]), float(cal["toe_px"][0]), float(cal["toe_px"][1]),
-                         float(cal["wall_height_mm"]))
+        if project.get("kind") == "general":
+            from ..general.pipeline import image_frame
+            shape = json.loads((folder / "results" / "summary.json").read_text())["frame"]
+            wall = image_frame(float(cal["mm_per_px"]), (int(shape["height_px"]), int(shape["width_px"])))
+        else:
+            wall = WallFrame(float(cal["mm_per_px"]), float(cal["toe_px"][0]), float(cal["toe_px"][1]),
+                             float(cal["wall_height_mm"]))
         seq = load_sequence(folder / project["images"].get("folder", "images"), project["images"].get("interval_s"))
         return cls(project_path, fields, bands, list(seq.paths), wall)
 
@@ -209,6 +214,10 @@ class Api:
             except (OSError, ValueError):
                 continue
             roles = {c.role for c in table.channels}
+            # A logger export has a time column and at least one other numeric column
+            # (a README or a one-line text file is not a logger).
+            if "time" not in roles or len(table.channels) + len(table.unmapped) < 2:
+                continue
             score = sum(r in roles for r in ("time", "force", "displacement")) + 0.1 * len(table.channels)
             if score > best:
                 logger, best = f, score
@@ -258,6 +267,27 @@ class Api:
                 "duration_s": float(seq.times_s[-1]), "width": int(first.shape[1]), "height": int(first.shape[0]),
                 "first": _png_data_url(preview), "last": _png_data_url(last), "preview_scale": scale,
                 "first_name": seq.paths[0].name, "last_name": seq.paths[-1].name}
+
+    def preview_area(self, folder: str, roi_px: list | None = None) -> dict:
+        """First photo with the automatically found object area outlined (any-test mode).
+
+        roi_px [x0, y0, x1, y1] (photo pixels) limits the search, if the user drew a box.
+        """
+        from ..general.region import object_mask
+        try:
+            seq = load_sequence(folder)
+            first = load_grayscale(seq.paths[0])
+            mask = object_mask(first, tuple(int(v) for v in roi_px) if roi_px else None)
+        except (FileNotFoundError, OSError, ValueError) as error:
+            return {"ok": False, "error": str(error)}
+        preview, scale = _downscale(_to_8bit(first))
+        small = np.asarray(Image.fromarray(mask.astype(np.uint8) * 255).resize(preview.shape[::-1], Image.NEAREST)) > 0
+        edge = small & ~ndimage.binary_erosion(small, iterations=2)
+        rgb = np.repeat(preview[..., None], 3, axis=2).astype(float)
+        rgb[~small] *= 0.35                         # dim what is not measured
+        rgb[edge] = (47, 111, 237)
+        share = float(mask.mean())
+        return {"ok": True, "image": _png_data_url(rgb.astype(np.uint8)), "share": share}
 
     def inspect_sensors(self, path: str) -> dict:
         try:
@@ -342,7 +372,11 @@ class Api:
         folder = APP_DIR / "demos" / f"SYNTH_{preset}"
         project_path = folder / "project.json"
         if not (folder / "results" / "summary.json").exists():
-            if not project_path.exists():
+            if not project_path.exists() and preset == "crack":
+                from ..synth.general import GeneralSpec, make_general_test
+                self._report("Creating the demo test (synthetic photos and logs)", 0.0, "Rendering a plate that cracks")
+                make_general_test(folder, GeneralSpec(mode="opening", zone_angle_deg=70.0))
+            elif not project_path.exists():
                 make_demo(folder, DemoSpec(preset=preset),
                           progress=lambda f, m: self._report("Creating the demo test (synthetic photos and logs)", f, m))
             pipeline.run(project_path, progress=self._report)
@@ -401,7 +435,8 @@ class Api:
                 continue
             bux, buz = a.displacement_at(k, pts[:, 0], pts[:, 1])
             col, row = a.wall.to_image(pts[:, 0] + bux, pts[:, 1] + buz)
-            disp_bands.append({"name": b["name"], "label": b["label"], "width_mm": b["width_mm"], "flags": b["flags"],
+            disp_bands.append({"name": b["name"], "label": b["label"], "mode": b.get("mode", ""),
+                               "width_mm": b["width_mm"], "flags": b["flags"],
                                "points": np.column_stack([col * scale, row * scale]).round(1).tolist()})
         return {"image": _png_data_url(np.clip(rgb, 0, 255).astype(np.uint8)), "width": display.shape[1],
                 "height": display.shape[0], "bands": disp_bands, "push_mm": float(a.push_mm[k]),

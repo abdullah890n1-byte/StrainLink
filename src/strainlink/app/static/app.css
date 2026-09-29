@@ -162,3 +162,12 @@ table.acc th { text-align: left; color: var(--muted); font-weight: 600; font-siz
 table.acc td { padding: 6px 8px; border-bottom: 1px solid var(--line); font-variant-numeric: tabular-nums; vertical-align: top; }
 table.acc td.mark { width: 26px; font-weight: 800; color: var(--good); } table.acc tr.bad td.mark { color: var(--bad); } table.acc tr.bad { background: var(--warn-soft); }
 table.acc tr.flagged td.mark { color: var(--warn); } .acc-banner.flag { background: var(--soft); color: var(--ink); }
+
+/* Test kind: retaining-wall model test vs any object or test. */
+body:not(.kind-general) .general-only { display: none !important; }
+body.kind-general .wall-only { display: none !important; }
+.kind-choice { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin: 4px 0 14px; }
+.area-box img { max-width: 100%; border-radius: 10px; display: block; }
+.formgrid .span-all { grid-column: 1 / -1; }
+.plot-pickers { display: flex; gap: 16px; align-items: center; flex-wrap: wrap; margin: 0 0 8px; }
+.plot-pickers select { max-width: 260px; }

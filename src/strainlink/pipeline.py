@@ -105,10 +105,18 @@ def _resolve(project: dict, relative: str) -> Path:
     return p if p.is_absolute() else Path(project["_dir"]) / p
 
 
-def run(project_path: str | Path, progress: Progress | None = None) -> RunSummary:
+def run(project_path: str | Path, progress: Progress | None = None) -> RunSummary | dict:
+    """Analyse a project. Retaining-wall tests return a RunSummary; any other test (kind "general") its summary dict."""
+    project = load_project(project_path)
+    if project.get("kind") == "general":
+        from .general import run as run_general
+        return run_general(project_path, progress)
+    return _run_wall(project_path, project, progress)
+
+
+def _run_wall(project_path: str | Path, project: dict, progress: Progress | None) -> RunSummary:
     started = time.perf_counter()
     report = progress or (lambda stage, fraction, message: None)
-    project = load_project(project_path)
     out_dir = Path(project["_dir"]) / "results"
     out_dir.mkdir(exist_ok=True)
 
