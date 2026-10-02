@@ -21,6 +21,9 @@ TEXTURE_FRACTION = 0.35
 TYPICAL_PERCENTILE = 90
 # Smallest detail of the outline kept (px); grain-scale gaps are closed.
 OUTLINE_SMOOTHING_PX = 5
+# Gaps inside the object smaller than this many texture windows (~subsets) are filled; larger ones
+# are real holes (a drilled hole, a notch) and stay out of the measured area.
+MAX_FILLED_HOLE_WINDOWS = 2.0
 
 
 def texture(image: np.ndarray) -> np.ndarray:
@@ -45,4 +48,8 @@ def object_mask(image: np.ndarray, roi_px: tuple[int, int, int, int] | None = No
         raise ValueError("no textured object found: DIC needs a speckle pattern or natural texture on the object")
     sizes = ndimage.sum(mask, labels, range(1, n + 1))
     mask = labels == (1 + int(np.argmax(sizes)))
-    return ndimage.binary_fill_holes(ndimage.binary_closing(mask, iterations=OUTLINE_SMOOTHING_PX))
+    # Close grain-scale gaps only: a real hole in the specimen (bigger than a few subsets) is
+    # not part of the object and must stay out (filling every hole measured inside it).
+    from skimage.morphology import remove_small_holes
+    closed = ndimage.binary_closing(mask, iterations=OUTLINE_SMOOTHING_PX)
+    return remove_small_holes(closed, max_size=int(MAX_FILLED_HOLE_WINDOWS * TEXTURE_WINDOW_PX**2))

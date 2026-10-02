@@ -13,7 +13,7 @@ comparison then fits DICe's change since the first frame to StrainLink's
 displacement (u, v in px) at the same material points, away from the
 crack, which also tells which component and unit DICe used.
 
-Run:  .venv/bin/python scripts/compare_springer_dice.py
+Run:  .venv/bin/python scripts/compare_springer_dice.py [--project other/project.json --out folder]
 Output: reports/springer_dice/ (summary.json, figure)
 """
 
@@ -32,7 +32,8 @@ import numpy as np
 
 ROOT = Path(__file__).resolve().parents[1]
 DATA = ROOT / "data" / "external" / "springer_bts"
-RESULTS = DATA / "StrainLink analysis" / "results"
+PROJECT = DATA / "StrainLink analysis" / "project.json"   # any analysis of video 1 (see --project)
+RESULTS = PROJECT.parent / "results"
 OUT = ROOT / "reports" / "springer_dice"
 VIDEOS = {"DISPLACEMENT_X": (DATA / "43452_2021_325_MOESM1_ESM.mp4", (1.0, 2.3)),
           "DISPLACEMENT_Y": (DATA / "43452_2021_325_MOESM2_ESM.mp4", (1.5, 2.6))}
@@ -89,13 +90,13 @@ def decode(frame: np.ndarray, cols: np.ndarray, rows: np.ndarray, scale) -> np.n
 
 def main() -> None:
     OUT.mkdir(parents=True, exist_ok=True)
-    project = json.loads((DATA / "StrainLink analysis" / "project.json").read_text())
+    project = json.loads(PROJECT.read_text())
     mm_per_px = project["calibration"]["mm_per_px"]
     fields = np.load(RESULTS / "fields.npz")
     summary = json.loads((RESULTS / "summary.json").read_text())
     bands = json.loads((RESULTS / "bands.json").read_text())
     height = summary["frame"]["height_px"]
-    with open(DATA / "43452_2021_325_MOESM1_ESM frames" / "frames.csv") as f:
+    with open(PROJECT.parent / project["images"]["folder"] / "frames.csv") as f:
         video_frames = [int(r["video_frame"]) for r in csv.DictReader(f)]
 
     x, z = fields["x_mm"], fields["z_mm"]
@@ -196,4 +197,14 @@ def crack_timing(fields, bands, summary, video_frames, ref_col, ref_row, x, z, m
 
 
 if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--project", help="another StrainLink analysis of video 1 (default: the reference one)")
+    parser.add_argument("--out", help="output folder")
+    args = parser.parse_args()
+    if args.project:
+        PROJECT = Path(args.project).resolve()
+        RESULTS = PROJECT.parent / "results"
+    if args.out:
+        OUT = Path(args.out)
     main()

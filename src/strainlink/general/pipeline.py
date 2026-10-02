@@ -37,8 +37,10 @@ from ..pipeline import (LazyImages, Progress, ProjectError, _clean, _json_defaul
                         load_project)
 from ..strain import compute_strain, fill_displacement_gaps
 from .events import MODE_NAMES, channel_events, zone_events
+from .findings import formation_order, zone_growth
 from .region import object_mask
 from .zones import kinematics
+from ..markers import ColourBrightness, check_dic
 
 STAGES = ("Loading", "Measuring movement (DIC)", "Strain and localisation zones", "Reading sensors",
           "Matching clocks", "Correlation engine", "Saving results")
@@ -59,6 +61,8 @@ THROUGH_WIDTHS = 2.0
 EXTENSOMETER_END_FRACTION = 0.05
 # Logger records are thinned to at most this many samples for event detection.
 MAX_EVENT_SAMPLES = 5000
+# DIC vs markers above this (px RMS) is flagged for review.
+MARKER_WARNING_PX = 0.2
 # Clock offsets searched (as a fraction of the logger duration) and the fit's resolution.
 OFFSET_SEARCH_STEPS = 400
 
@@ -161,6 +165,20 @@ def run(project_path: str | Path, progress: Progress | None = None) -> dict:
     tracks = _secondary_tracks(per_frame, axis_values)
     modes, series, crossing = _zone_summaries(tracks, per_frame, kin, x_mm, z_mm, inside.reshape(grid.shape), n, spacing)
 
+    # Markers (optional): an independent check of DIC on this very test.
+    marker_result = None
+    if project.get("markers"):
+        report(STAGES[2], 1.0, "Checking DIC against the markers")
+        cfg = project["markers"]
+        zone_mask = _zone_mask(per_frame[-1], x_mm, z_mm)
+        marker_images = ColourBrightness(sequence.paths) if cfg.get("channel") == "brightness" else images
+        marker_result, marker_tracks = check_dic(
+            marker_images, mask, gx.astype(float), gy.astype(float),
+            fields["ux"] / mm_per_px, -fields["uz"] / mm_per_px, zone_mask, mm_per_px,
+            cfg.get("polarity", "dark"), tuple(cfg.get("diameter_px", (6.0, 40.0))))
+        marker_result["channel"] = cfg.get("channel", "grey")
+        _write_markers(out_dir, marker_tracks)
+
     # 5. Per-photo table and correlation.
     report(STAGES[5], 0.0, "Finding and testing relationships")
     frames = pd.DataFrame({"photo": np.arange(1, n + 1), "time_s": sequence.times_s, timing["axis_label"]: axis_values})
@@ -185,6 +203,10 @@ def run(project_path: str | Path, progress: Progress | None = None) -> dict:
     o_events = zone_events(tracks, modes, crossing, max(frame_sigma, timing["axis_sigma"]))
     axis_words = (timing["axis_name"], timing["axis_unit"])
     findings = correlate.coincidences(s_events, o_events, axis_words)
+    # Findings about the object itself (these need no logger).
+    zone_list = [{"name": t.name, "mode": modes.get(t.name, ""), "onset": t.onset_mm} for t in tracks]
+    findings += formation_order(o_events, axis_words)
+    findings += zone_growth(zone_list, series, axis_values, axis_words)
     warnings = []
     # The loading axis itself is left out of screening: everything the object does changes with it.
     screened = [c for c in sensor_cols if c != timing.get("axis_channel")]
@@ -194,7 +216,7 @@ def run(project_path: str | Path, progress: Progress | None = None) -> dict:
         warnings.append(f"Only {len(frames)} photos: continuous screening needs at least "
                         f"{correlate.MIN_FRAMES_FOR_SCREENING}.")
     if table is None:
-        warnings.append("No logger file: object behaviour is described, but there are no sensor records to correlate with.")
+        warnings.append("No logger file: the findings describe the object itself. Add the logger file to link it to loads and sensors.")
 
     # 6. Save.
     report(STAGES[6], 0.0, "Writing results")
@@ -215,13 +237,14 @@ def run(project_path: str | Path, progress: Progress | None = None) -> dict:
         "area": {"points": int(inside.sum()), "size_mm": [float(np.ptp(x_mm[inside.reshape(grid.shape)])),
                                                            float(np.ptp(z_mm[inside.reshape(grid.shape)]))]},
         "sync": timing["sync"],
+        "markers": marker_result,
         "zones": [{"name": t.name, "mode": modes.get(t.name, ""), "onset": t.onset_mm, "through": crossing.get(t.name),
                    "push_mm": t.delta_mm, "length_mm": [b.length_mm for b in t.bands],
                    "width_mm": [b.width_mm for b in t.bands]} for t in tracks],
         "object_columns": obj_cols, "sensor_columns": sorted(sensor_cols, key=lambda c: c == timing.get("axis_channel")),
         "correlation": {"findings": [f.as_dict() for f in correlate.ranked(findings)],
                         "events": [asdict(e) for e in s_events + o_events], "warnings": warnings},
-        "flags": _flags(per_frame, timing, sequence.time_source),
+        "flags": _flags(per_frame, timing, sequence.time_source, sequence.paths) + _marker_flags(marker_result),
     })
     (out_dir / "summary.json").write_text(json.dumps(summary, indent=1, default=_json_default))
     report(STAGES[6], 1.0, "Done")
@@ -412,6 +435,41 @@ def _object_series(fields: dict, ext: dict, per_frame) -> dict[str, np.ndarray]:
     }
 
 
+def _zone_mask(frame_bands, x: np.ndarray, z: np.ndarray) -> np.ndarray:
+    """Grid points within one zone width of a zone's centreline (last photo)."""
+    mask = np.zeros(x.shape, dtype=bool)
+    points = np.column_stack([x.ravel(), z.ravel()])
+    for band in frame_bands.bands:
+        from scipy.spatial import cKDTree
+        distance = cKDTree(band.points).query(points)[0].reshape(x.shape)
+        mask |= distance <= band.width_mm
+    return mask
+
+
+def _write_markers(out_dir: Path, tracks) -> None:
+    rows = {"photo": np.arange(1, tracks.x.shape[0] + 1)}
+    for m in range(tracks.count):
+        rows[f"M{m + 1} x (px)"], rows[f"M{m + 1} y (px)"] = tracks.x[:, m], tracks.y[:, m]
+    pd.DataFrame(rows).to_csv(out_dir / "markers.csv", index=False)
+
+
+def _marker_flags(result: dict | None) -> list[str]:
+    if not result:
+        return []
+    if result["found"] == 0:
+        return ["Markers were expected but none were found: check their size (px) and whether they are darker or brighter "
+                "than the object."]
+    flags = []
+    if result.get("used", 0) and result["median_px"] > MARKER_WARNING_PX:
+        flags.append(f"DIC differs from the markers by {result['median_px']:.2f} px (median, above {MARKER_WARNING_PX} px): "
+                     f"check focus, lighting, the speckle pattern and the photo spacing.")
+    if result.get("disagreeing"):
+        names = ", ".join(f"M{i + 1}" for i in result["disagreeing"])
+        flags.append(f"Marker(s) {names} disagree strongly with DIC: probably mis-tracked (jumped to a nearby dark spot, "
+                     f"or a natural marker rolled). Check them in the Accuracy tab.")
+    return flags
+
+
 def _track_name(tracks: list[BandTrack], k: int, band) -> str:
     for t in tracks:
         for kk, b in zip(t.frames, t.bands):
@@ -420,8 +478,15 @@ def _track_name(tracks: list[BandTrack], k: int, band) -> str:
     return ""
 
 
-def _flags(per_frame, timing: dict, time_source: str) -> list[str]:
+def _flags(per_frame, timing: dict, time_source: str, photo_paths=()) -> list[str]:
     flags = []
+    # Lossy compression biases sub-pixel matching (strong JPEG: ~1% strain bias in testing).
+    if time_source == "video":
+        flags.append("The frames come from a compressed video: expect slightly lower accuracy than from photos "
+                     "(record at the highest quality, or take photos as TIFF/PNG for the most precise strain).")
+    elif any(Path(p).suffix.lower() in (".jpg", ".jpeg") for p in photo_paths):
+        flags.append("The photos are JPEG (compressed): at strong compression strain can be biased by ~1%. "
+                     "Prefer TIFF/PNG or the camera's highest quality setting.")
     if time_source == "file-time":
         flags.append("Photo times come from file modification times (least reliable). Prefer camera times, a video, "
                      "or the photo interval.")

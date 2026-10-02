@@ -79,3 +79,18 @@ def test_small_crack_test_end_to_end(small_crack_test):
     assert checks["Direction of the zone"]["ok"]
     assert checks["Zone appears at"]["ok"]
     assert all(c["ok"] for item, c in checks.items() if item.startswith("Strain"))
+
+
+def test_object_findings_without_a_logger():
+    from strainlink.correlate.events import Event
+    from strainlink.general.findings import formation_order, zone_growth
+    axis = np.arange(20.0)
+    opening = np.where(axis >= 10, 0.02 * (axis - 9), np.nan)
+    growth = zone_growth([{"name": "Z1", "mode": "opening", "onset": 10.0}], {"Z1 opening (mm)": opening}, axis, ("time", "s"))
+    assert growth[0].strength == "strong" and "keeps opening" in growth[0].statement
+    together = formation_order([Event("Z1.onset", "Z1 (crack) appears", "object", 10.0, 0.5, "Z1"),
+                                Event("Z2.onset", "Z2 (crack) appears", "object", 10.2, 0.5, "Z2")], ("time", "s"))
+    assert "same time" in together[0].statement
+    ordered = formation_order([Event("Z1.onset", "Z1 (crack) appears", "object", 10.0, 0.5, "Z1"),
+                               Event("Z2.onset", "Z2 (shear band) appears", "object", 16.0, 0.5, "Z2")], ("time", "s"))
+    assert ordered[0].strength == "strong" and "forms first" in ordered[0].statement
