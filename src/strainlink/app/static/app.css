@@ -171,3 +171,9 @@ body.kind-general .wall-only { display: none !important; }
 .formgrid .span-all { grid-column: 1 / -1; }
 .plot-pickers { display: flex; gap: 16px; align-items: center; flex-wrap: wrap; margin: 0 0 8px; }
 .plot-pickers select { max-width: 260px; }
+/* Always-visible way back to the start page (except while an analysis is running). */
+.navback { -webkit-app-region: no-drag; padding: 6px 12px; font-size: 13px; font-weight: 600; border-radius: 9px; }
+.badge.info { background: var(--soft); color: var(--muted); }
+.noteitem { margin: 10px 0; padding: 10px 14px; border-radius: 10px; background: var(--soft); color: var(--ink); font-size: 13.5px; }
+.marker-box { margin: 10px 0; } .marker-box .row { margin-top: 6px; display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
+#marker-check { margin-bottom: 18px; }

@@ -53,6 +53,8 @@ class GeneralSpec:
     poisson: float = 0.3
     image_noise_grey: float = 1.5
     seed: int = 7
+    markers: int = 0                           # dark marker dots painted on the plate (move with it)
+    marker_radius_px: float = 6.0
 
 
 def _geometry(spec: GeneralSpec):
@@ -100,6 +102,26 @@ def displacement(spec: GeneralSpec, eps: float, jump_x: float):
     return field, jump
 
 
+MARKER_GREY = 8.0
+
+
+def marker_centres(spec: GeneralSpec) -> np.ndarray:
+    """Reference positions (col, row px) of the marker dots: random on the plate, away from its edges."""
+    if not spec.markers:
+        return np.empty((0, 2))
+    rng = np.random.default_rng(spec.seed + 100)
+    rows, cols = spec.image_px
+    centre, _, _ = _geometry(spec)
+    half = np.array(spec.plate_mm) / 2 / spec.mm_per_px - 4 * spec.marker_radius_px
+    cpx = np.array([centre[0] / spec.mm_per_px, rows - centre[1] / spec.mm_per_px])
+    points: list[np.ndarray] = []
+    while len(points) < spec.markers:
+        p = cpx + rng.uniform(-1, 1, 2) * half
+        if all(np.hypot(*(p - q)) > 6 * spec.marker_radius_px for q in points):
+            points.append(p)
+    return np.asarray(points)
+
+
 def render(spec: GeneralSpec, texture: SpeckleTexture, eps: float, jump_x: float, rng) -> np.ndarray:
     rows, cols = spec.image_px
     field, _ = displacement(spec, eps, jump_x)
@@ -113,6 +135,12 @@ def render(spec: GeneralSpec, texture: SpeckleTexture, eps: float, jump_x: float
     cpx = np.array([centre[0] / spec.mm_per_px, rows - centre[1] / spec.mm_per_px])
     on_plate = (np.abs(ref_x - cpx[0]) <= half[0]) & (np.abs(ref_y - cpx[1]) <= half[1])
     value = np.where(on_plate, 40.0 + 170.0 * texture.evaluate(ref_x, ref_y), BACKGROUND_GREY)
+    for mx, my in marker_centres(spec):
+        # A marker is part of the material (drawn at its reference position), with a soft
+        # one-pixel edge as a camera lens gives it: hard-edged dots jitter by ~0.1 px as they
+        # cross the pixel grid, which real markers don't.
+        cover = np.clip(spec.marker_radius_px + 0.5 - np.hypot(ref_x - mx, ref_y - my), 0.0, 1.0)
+        value = cover * MARKER_GREY + (1.0 - cover) * value
     image = value.reshape(rows, PIXEL_SAMPLES, cols, PIXEL_SAMPLES).mean(axis=(1, 3))
     image = image + rng.normal(0.0, spec.image_noise_grey, image.shape)
     return np.clip(np.round(image), 0, 255).astype(np.uint8)
@@ -175,5 +203,17 @@ def make_general_test(folder: str | Path, spec: GeneralSpec | None = None) -> Pa
         "planted_link": ["Load (kN)", "zone onset"], "unrelated_channel": "Temperature (C)",
         "note": "Mean strains are over the plate away from the zone (the elastic strain).",
     }
+    if spec.markers:
+        centres = marker_centres(spec)
+        moves = []
+        for k in range(spec.photos):
+            field, _ = displacement(spec, h["elastic"][k], h["jump_x"][k])
+            u, v = field(centres[:, 0], centres[:, 1])
+            moves.append(np.column_stack([u, v]).round(5).tolist())
+        truth["markers"] = {"centres_px": centres.round(4).tolist(), "radius_px": spec.marker_radius_px,
+                            "displacement_px": moves}
+        project["markers"] = {"polarity": "dark", "diameter_px": [0.8 * 2 * spec.marker_radius_px,
+                                                                  2.5 * 2 * spec.marker_radius_px]}
+        (folder / "project.json").write_text(json.dumps(project, indent=2))
     (folder / "truth.json").write_text(json.dumps(truth, indent=1))
     return folder / "project.json"

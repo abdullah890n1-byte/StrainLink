@@ -13,6 +13,7 @@
     <svg viewBox="0 0 32 32" class="logo" aria-hidden="true"><rect x="2" y="2" width="28" height="28" rx="8"/><path d="M7 22 C 12 21, 16 16, 25 8" /><path d="M9 25 L 24 25" class="ground"/></svg>
     <span>StrainLink</span>
   </div>
+  <button id="nav-back" class="navback hidden" title="Back to the start page (Esc)">← Home</button>
   <nav class="crumbs" id="crumbs"></nav>
   <div class="topright"><span id="version" class="muted small"></span></div>
 </header>
@@ -111,6 +112,14 @@
         </div>
         <div class="canvaswrap"><canvas id="cal-canvas"></canvas></div>
         <div class="row wall-only"><label class="inline">Retained soil height at the wall (effective height H) <input type="number" id="wall-h" value="390" min="0" step="any"> mm</label></div>
+        <div class="general-only marker-box">
+          <label class="inline"><input type="checkbox" id="use-markers"> The object carries <b>markers</b> (dots, beads, stickers): use them to check DIC's accuracy on this test</label>
+          <div id="marker-options" class="row hidden">
+            <label class="inline small">Markers are <select id="marker-polarity"><option value="dark">darker</option><option value="bright">brighter</option><option value="dark-colour">dark in every colour (object is coloured)</option></select> than the object,</label>
+            <label class="inline small">about <input type="number" id="marker-size" min="4" step="any" value="12" class="short"> px across</label>
+            <span class="muted small">Markers must be clearly darker (or brighter) than anything in the speckle, and at least ~8 px across.</span>
+          </div>
+        </div>
         <div class="general-only area-box"><p class="small"><b>Measured area</b> <span class="muted">— found automatically: the textured, in-focus object (outlined). Plain background is left out.</span></p><img id="area-img" alt=""><p id="area-note" class="muted small"></p></div>
         <div class="facts" id="cal-facts"></div>
       </div>
@@ -194,8 +203,9 @@
     <div class="tab hidden" data-tab="findings"><p class="muted small">Graded by the strength of the evidence. Every statement is computed from your data; open a finding to see the numbers and the method.</p><div id="findings-list"></div></div>
     <div class="tab hidden" data-tab="review"><div id="review-flags"></div></div>
     <div class="tab hidden" data-tab="accuracy">
+      <div id="marker-check" class="hidden"></div>
       <div id="acc-banner" class="acc-banner"></div>
-      <p class="muted small">This test is synthetic, so the true answers are known exactly. Every automatic result is compared with its true value and judged against the tolerance shown (the same tolerances as in StrainLink's validation records).</p>
+      <p class="muted small" id="acc-intro">This test is synthetic, so the true answers are known exactly. Every automatic result is compared with its true value and judged against the tolerance shown (the same tolerances as in StrainLink's validation records).</p>
       <div id="acc-table"></div>
     </div>
   </section>

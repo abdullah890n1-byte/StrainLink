@@ -27,7 +27,7 @@ MUTED = "#6b7385"
 ACCENT = "#2f6fed"
 BAND_COLOURS = {"primary": "#e0452b", "radial": "#f59f00", "intermediate": "#12b886",
                 "wall-interface": "#868e96", "unattached": "#7950f2"}
-STRENGTH_COLOURS = {"strong": "#2b8a3e", "moderate": "#1971c2", "weak": "#868e96", "not supported": "#c92a2a"}
+STRENGTH_COLOURS = {"strong": "#2b8a3e", "moderate": "#1971c2", "weak": "#868e96", "not supported": "#c92a2a", "info": "#868e96"}
 FIG_DPI = 110
 
 

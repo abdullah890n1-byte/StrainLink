@@ -36,8 +36,16 @@ function show(view, crumb = "") {
   $$(".view").forEach((v) => v.classList.add("hidden"));
   $(`#view-${view}`).classList.remove("hidden");
   $("#crumbs").textContent = crumb;
+  // A way back from every screen; hidden on the start page and while an analysis runs.
+  $("#nav-back").classList.toggle("hidden", view === "home" || view === "running");
+  state.view = view;
   window.scrollTo(0, 0);
 }
+function goHome() { stopPlay(); document.body.classList.toggle("kind-general", false); loadHome(); }
+$("#nav-back").onclick = goHome;
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && (state.view === "results" || state.view === "wizard") && !e.target.closest("input, select, textarea")) goHome();
+});
 
 /* ---------------- home ---------------- */
 async function loadHome() {
@@ -53,7 +61,7 @@ async function loadHome() {
   });
   show("home");
 }
-$(".brand").onclick = () => { stopPlay(); loadHome(); };
+$(".brand").onclick = goHome;
 $("#btn-new").onclick = () => startWizard();
 $("#btn-open").onclick = async () => { const p = await api().choose("project"); if (p) openProject(p); };
 $$("#demo-choice button").forEach((b) => b.onclick = () => { $$("#demo-choice button").forEach((x) => x.classList.remove("on")); b.classList.add("on"); });
@@ -91,7 +99,7 @@ function startWizard() {
     channels: [], cal: { points: [], toe: null, tool: "scale" }, testFolder: "" });
   $("#found").classList.add("hidden"); $("#dropzone").classList.remove("hidden", "compact");
   $("#proj-name").value = ""; $("#scale-direct").value = "";
-  show("wizard", "New analysis"); goStep(0);
+  show("wizard", "New analysis"); goStep(0); setKind(state.kind || "wall");
 }
 function goStep(n) {
   state.step = n;
@@ -152,6 +160,7 @@ async function scanFolder(folder) {
   if (r.video) await useVideo(r.video);
   else if (r.photos) await inspectPhotos(r.photos);
   else markFound("photos", false, "no photos or video found — choose the photo folder or the video");
+  $("#mapping-box").classList.toggle("hidden", !r.logger);
   if (r.logger) await loadSensors(r.logger);
   else if (isGeneral()) markFound("logger", false, "none — optional: add one to correlate the object with your sensor records", true);
   else markFound("logger", false, "not found — choose the logger export");
@@ -206,7 +215,7 @@ $("#interval").onchange = () => { state.interval = +$("#interval").value || null
 async function loadSensors(path) {
   const r = await api().inspect_sensors(path);
   if (!r.ok) { markFound("logger", false, r.error); return; }
-  state.sensors = r; state.sensorPath = path;
+  state.sensors = r; state.sensorPath = path; $("#mapping-box").classList.remove("hidden");
   state.channels = r.channels.map((c) => ({ ...c, unit: normaliseUnit(c.unit, c.role) }));
   r.unmapped.forEach((col) => state.channels.push({ column: col, role: "ignore", unit: "-", factor: 1, name: col, confidence: 0 }));
   markFound("logger", true, `${path.split("/").pop()} · ${r.rows} rows · ${r.columns.length} columns`);
@@ -345,6 +354,7 @@ document.addEventListener("mouseup", () => {
   $("#clear-area").classList.toggle("hidden", !state.cal.box);
   drawCalibration.redraw && drawCalibration.redraw(); loadArea();
 });
+$("#use-markers").onchange = () => $("#marker-options").classList.toggle("hidden", !$("#use-markers").checked);
 $("#clear-area").onclick = () => { state.cal.box = null; $("#clear-area").classList.add("hidden"); drawCalibration.redraw && drawCalibration.redraw(); loadArea(); };
 function mmPerPx() {
   const direct = +$("#scale-direct").value;
@@ -398,6 +408,9 @@ function buildProject() {
       images: { folder: state.photosFolder, ...(state.interval ? { interval_s: state.interval } : {}),
                 ...(state.video ? { video: state.video.path, video_every_s: state.video.every_s } : {}) },
       calibration: { mm_per_px: mmpp, ...(roiPx() ? { roi_px: roiPx() } : {}) },
+      ...($("#use-markers").checked ? { markers: { polarity: $("#marker-polarity").value === "bright" ? "bright" : "dark",
+        ...($("#marker-polarity").value === "dark-colour" ? { channel: "brightness" } : {}),
+        diameter_px: [0.7 * +$("#marker-size").value, 1.6 * +$("#marker-size").value] } } : {}),
       ...(state.sensorPath ? { sensors: { file: state.sensorPath,
         channels: state.channels.map((c) => ({ column: c.column, role: c.role === "ignore" ? "ignore" : c.role, unit: c.unit, factor: FACTORS[c.unit] || 1, name: c.name, confidence: 1 })) } } : {}),
       sync: syncMode() === "offset" ? { mode: "offset", offset_s: +$("#sync-offset").value } : { mode: "auto" },
@@ -421,7 +434,8 @@ function fillReview() {
   const items = isGeneral() ? [["Test", $("#proj-name").value || "Untitled test"], ["Kind", "Any object or test"],
     ["Photos", state.photos ? `${state.photos.count} ${state.video ? "frames from the video" : "photos"}` : null],
     ["Data-logger file", state.sensorPath ? state.sensorPath.split("/").pop() : { warn: "none — the object is measured, but there is nothing to correlate with" }],
-    ["Scale", mmPerPx() ? `${mmPerPx().toFixed(4)} mm/px` : null], ["Measured area", "found automatically"],
+    ["Scale", mmPerPx() ? `${mmPerPx().toFixed(4)} mm/px` : null], ["Measured area", roiPx() ? "found automatically, limited to your box" : "found automatically"],
+    ["Accuracy check", $("#use-markers").checked ? `markers (${$("#marker-polarity").value}, ~${$("#marker-size").value} px)` : { warn: "no markers — accuracy on this test can't be measured directly" }],
     ["Clock matching", state.sensorPath ? (syncMode() === "offset" ? "known offset" : "automatic") : "not needed"]] : [["Test", $("#proj-name").value || null], ["Photos", state.photos ? `${state.photos.count} photos` : null], ["Data-logger file", state.sensorPath ? state.sensorPath.split("/").pop() : null],
     ["Calibration run", state.calPath ? state.calPath.split("/").pop() : { warn: "none — forces will include base friction" }], ["Scale", mmPerPx() ? `${mmPerPx().toFixed(4)} mm/px` : null],
     ["Wall toe", state.cal.toe ? "set" : null], ["Unit weight", $("#gamma").value ? `${$("#gamma").value} kN/m³` : null], ["Clock matching", { dic: "automatic", offset: "known offset", "push-step": "photo every fixed push" }[syncMode()]]];
@@ -436,7 +450,8 @@ function fillReview() {
 $("#pick-save").onclick = async () => { const p = await api().choose("folder", state.testFolder); if (p) { state.savePath = `${p}/project.json`; fillReview(); } };
 $("#btn-run").onclick = async () => {
   const project = buildProject();
-  api().save_defaults({ unit_weight_kn_m3: project.test.unit_weight_kn_m3, wall_width_mm: project.test.wall_width_mm,
+  // Wall tests: remember the soil and wall details for the next test (any-object tests have none).
+  if (project.test) api().save_defaults({ unit_weight_kn_m3: project.test.unit_weight_kn_m3, wall_width_mm: project.test.wall_width_mm,
     wall_weight_kn: project.test.wall_weight_kn, cell_depths_mm: project.test.cell_depths_mm, wall_height_mm: project.calibration.wall_height_mm });
   const saved = await api().save_project(project, state.savePath);
   if (!saved.ok) return toast(saved.error);
@@ -515,15 +530,16 @@ function renderCards(s) {
   $("#res-cards").innerHTML = cards.map(([k, v, sub, flag]) => `<div class="card">${flag ? flagged(flag) : ""}<div class="k">${k}</div><div class="v">${esc(v)}</div><div class="s">${esc(sub)}</div></div>`).join("");
 }
 function renderFindings(s) {
-  const badge = { strong: "strong", moderate: "moderate", weak: "weak", "not supported": "not" };
+  const badge = { strong: "strong", moderate: "moderate", weak: "weak", "not supported": "not", info: "info" };
   const list = s.correlation.findings;
-  $("#findings-list").innerHTML = (list.length ? list : [{ strength: "not supported", statement: "No findings could be computed for this test.", evidence: {}, caveats: [], method: "" }])
+  // No findings is information, not a failure: say why, in a neutral card.
+  $("#findings-list").innerHTML = (list.length ? list : [{ strength: "info", statement: "Nothing to link yet: there are no zones or sensor events in this test to compare.", evidence: {}, caveats: [], method: "" }])
     .map((f) => `<div class="finding"><span class="badge ${badge[f.strength]}">${esc(f.strength)}</span>
       <div class="st">${esc(f.statement)}</div>
       ${f.method ? `<details><summary>Evidence and method</summary><p class="muted small">${esc(f.method)}</p>
       <table>${Object.entries(f.evidence).map(([k, v]) => `<tr><td>${esc(k)}</td><td>${esc(v)}</td></tr>`).join("")}</table>
       ${f.caveats.map((c) => `<div class="caveat">⚠ ${esc(c)}</div>`).join("")}</details>` : ""}</div>`).join("")
-    + (s.correlation.warnings || []).map((w) => `<div class="flagitem">${esc(w)}</div>`).join("");
+    + (s.correlation.warnings || []).map((w) => `<div class="noteitem">ℹ︎ ${esc(w)}</div>`).join("");
 }
 function renderReview(s) {
   $("#review-count").textContent = s.flags.length || "";
@@ -531,9 +547,23 @@ function renderReview(s) {
   $("#review-flags").innerHTML = s.flags.length ? s.flags.map((f) => `<div class="flagitem">⚑ <span>${esc(f)}</span></div>`).join("")
     : '<p class="muted">Nothing needs your review: all results are within the validated tolerances.</p>';
 }
+function renderMarkerCheck(s) {
+  const m = s.markers, box = $("#marker-check");
+  box.classList.toggle("hidden", !m);
+  if (!m) return;
+  const note = (i) => m.in_zones.includes(i) ? "inside a crack/band (reported separately)" : (m.disagreeing || []).includes(i) ? "⚑ disagrees strongly: probably mis-tracked (jumped to a nearby dark spot) — check it" : "";
+  const rows = (m.per_marker_rms_px || []).map((v, i) => `<tr class="${(m.disagreeing || []).includes(i) ? "flagged" : ""}"><td>M${i + 1}</td><td>${fmt(m.diameters_px[i], 1)} px</td><td>${v === null ? "not compared" : fmt(v, 3) + " px"}</td><td class="muted">${note(i)}</td></tr>`).join("");
+  box.innerHTML = `<h3>Check against the markers on this test</h3>
+    <div class="acc-banner ${m.used && m.median_px <= 0.2 ? "good" : "warn"}">${m.used ? `DIC and the markers agree to <b>${fmt(m.median_px, 3)} px</b> (median, ${fmt(m.median_mm * 1000, 1)} µm) over ${m.used} markers; RMS over all ${fmt(m.rms_px, 3)} px${m.disagreeing.length ? `; ${m.disagreeing.length} marker(s) disagree strongly (listed below)` : ""}.` : "No markers could be compared."}</div>
+    <p class="muted small">Each marker is located from its own dark (bright) spot, independently of DIC. The markers themselves are accurate to about 0.06 px, so agreement at that level means DIC is at least that accurate on this test.</p>
+    <table class="acc"><thead><tr><th>Marker</th><th>Size</th><th>DIC − marker (RMS)</th><th></th></tr></thead><tbody>${rows}</tbody></table>`;
+}
 async function renderAccuracy(path) {
+  const s = state.results.summary;
+  renderMarkerCheck(s);
   const r = await api().accuracy(path);
-  $("#tab-accuracy").classList.toggle("hidden", !r.ok);
+  $("#tab-accuracy").classList.toggle("hidden", !r.ok && !s.markers);
+  ["#acc-banner", "#acc-intro", "#acc-table"].forEach((q) => $(q).classList.toggle("hidden", !r.ok));
   if (!r.ok) return;
   const all = r.passed === r.total;
   $("#acc-banner").className = `acc-banner ${all ? "good" : r.silent ? "warn" : "flag"}`;
@@ -606,7 +636,7 @@ function drawOverview() {
 function axisText(s, v) { return `${fmt(v, 3)} ${s.axis.unit}`; }
 function renderGeneralCards(s) {
   const pp = state.results.per_photo, zones = s.zones || [];
-  const zoneList = zones.map((z) => `${z.name} (${MODE_SHORT[z.mode || ""]})`).join(", ");
+  const zoneList = zones.map((z) => `${z.name} (${MODE_SHORT[z.mode || ""]}${z.onset === null ? ", seen briefly" : ""})`).join(", ");
   const cards = [
     ["Photos analysed", String(s.frames), `${s.area.points} measurement points`],
     ["Object size", `${fmt(s.area.size_mm[0], 1)} × ${fmt(s.area.size_mm[1], 1)} mm`, "measured area"],
@@ -614,8 +644,15 @@ function renderGeneralCards(s) {
     ["Strain εzz (end)", fmt(100 * (lastValue(pp["strain εzz"] || []) ?? NaN), 3, "%"), "typical, over the object"],
     ["Peak shear strain", fmt(lastValue(pp["peak shear strain γmax"] || []), 4), "γmax, end of test"],
     ["Localisation zones", String(zones.length), zoneList || "none found"],
-    ...zones.slice(0, 3).map((z) => [`${z.name} appears at`, z.onset === null ? "—" : axisText(s, z.onset), `${s.axis.name}${z.through !== null ? " · runs across the object" : ""}`]),
+    // Only zones seen in consecutive photos (a confirmed onset) get their own card.
+    ...zones.filter((z) => z.onset !== null).slice(0, 3).map((z) => [`${z.name} appears at`, axisText(s, z.onset), `${s.axis.name}${z.through !== null ? " · runs across the object" : ""}`]),
   ];
+  if (s.markers) {
+    const m = s.markers;
+    cards.push(m.used ? ["DIC vs markers", `${fmt(m.median_px, 3)} px`, `median · ${fmt(m.median_mm * 1000, 1)} µm · ${m.used} markers${m.disagreeing.length ? ` · ${m.disagreeing.length} disagree` : ""}`,
+      m.disagreeing.length ? "Some markers disagree strongly: see the Accuracy tab" : ""]
+      : ["DIC vs markers", "—", `${m.found} markers found`, "No markers could be compared: see Review"]);
+  }
   if (s.sync && s.sync.clock_offset_s !== undefined) {
     cards.push(["Clock match", `${fmt(s.sync.clock_offset_s, 2)} s`, `± ${fmt(s.sync.offset_sigma_s, 2)} s · ${s.sync.source === "dic" ? "automatic" : s.sync.source}`,
       s.flags.some((f) => f.includes("matched to the logger")) ? "The clock match is uncertain" : ""]);
@@ -626,7 +663,11 @@ function renderGeneralCards(s) {
 function fillPickers(s, pp) {
   const sensors = (s.sensor_columns || []).filter((c) => pp[c]);
   const objects = (s.object_columns || []).filter((c) => pp[c]);
-  $("#pick-sensor").innerHTML = sensors.length ? sensors.map((c) => `<option>${esc(c)}</option>`).join("") : "<option value=''>no logger file</option>";
+  // Without a logger the left chart shows a second measure of the object instead of an empty plot.
+  const left = sensors.length ? sensors : objects;
+  $("#pick-sensor").innerHTML = left.map((c) => `<option>${esc(c)}</option>`).join("");
+  $("#pick-sensor").previousSibling.textContent = sensors.length ? "Sensor " : "Measure ";
+  if (!sensors.length && objects.includes("peak shear strain γmax")) $("#pick-sensor").value = "peak shear strain γmax";
   $("#pick-object").innerHTML = objects.map((c) => `<option>${esc(c)}</option>`).join("");
   const preferred = objects.find((c) => /opening|slip/.test(c)) || objects.find((c) => c === "peak shear strain γmax");
   if (preferred) $("#pick-object").value = preferred;
@@ -645,10 +686,12 @@ function drawOverviewGeneral() {
   const sensor = $("#pick-sensor").value, object = $("#pick-object").value;
   const objectEvents = s.correlation.events.filter((e) => e.source === "object");
   const sensorEvents = s.correlation.events.filter((e) => e.source === "sensor" && (!sensor || e.subject === sensor));
-  const ls = plotLayout(s.axis.label, sensor || "no logger file"); ls.showlegend = false;
+  const leftPercent = /^(strain|shear strain)/.test(sensor);
+  const ls = plotLayout(s.axis.label, sensor + (leftPercent ? " (%)" : "")); ls.showlegend = false;
   ls.shapes = [cursorShape(at), ...eventLines([...sensorEvents, ...objectEvents])]; ls.annotations = eventTags([...sensorEvents, ...objectEvents]);
-  Plotly.react("plot-force", sensor ? [{ x, y: pp[sensor], mode: "lines", line: { color: css("--ink"), width: 1.6 } }] : [{ x: [], y: [] }], ls, PLOT_CONFIG);
-  const percent = object && object.startsWith("strain") || object.startsWith("shear strain");
+  const ly = (pp[sensor] || []).map((v) => (v === null ? null : leftPercent ? 100 * v : v));
+  Plotly.react("plot-force", [{ x, y: ly, mode: "lines", line: { color: css("--ink"), width: 1.6 } }], ls, PLOT_CONFIG);
+  const percent = /^(strain|shear strain)/.test(object);
   const lo = plotLayout(s.axis.label, object + (percent ? " (%)" : "")); lo.showlegend = false;
   lo.shapes = [cursorShape(at), ...eventLines(objectEvents)];
   const y = (pp[object] || []).map((v) => (v === null ? null : percent ? 100 * v : v));
