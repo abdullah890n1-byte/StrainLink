@@ -25,6 +25,7 @@ from .. import __version__, pipeline, report
 from ..calib import WallFrame
 from ..dic import load_grayscale
 from ..bands.ridges import fill_missing
+from ..fields import QUANTITIES, FieldStore
 from ..io.images import load_sequence
 from ..io.sensors import load_sensors
 from ..io import video as video_io
@@ -43,6 +44,8 @@ MAX_RECENT = 8
 PREVIEW_WIDTH = 900
 # Strain overlay colour map endpoints (transparent -> strong magenta-red).
 OVERLAY_ALPHA = 0.75
+# Samples along a line profile.
+LINE_SAMPLES = 120
 # Fixed-point iterations to find where a displayed pixel was in the first
 # photo (X = x - u(X)); the displacement varies slowly enough that a few suffice.
 INVERSE_MAP_ITERATIONS = 4
@@ -70,28 +73,27 @@ def _downscale(image: np.ndarray) -> tuple[np.ndarray, float]:
 
 
 class _Analysis:
-    """Everything the photo viewer needs from one analysis, loaded once."""
+    """Everything the photo viewer and the inspection tools need from one analysis, loaded once."""
 
-    def __init__(self, project_path: str, fields, bands: list, photo_paths: list, wall: WallFrame):
+    def __init__(self, project_path: str, store: FieldStore, bands: list, photo_paths: list, wall: WallFrame):
         self.project_path = project_path
         self.wall = wall
         self.bands = bands
         self.photo_paths = photo_paths
-        x, z = fields["x_mm"], fields["z_mm"]
+        self.store = store
+        x, z = store.x, store.z
         # The DIC grid is regular in the first photo: index = (position - origin) / step.
         self.x0, self.dx = float(x[0, 0]), float(x[0, 1] - x[0, 0])
         self.z0, self.dz = float(z[0, 0]), float(z[1, 0] - z[0, 0])
-        self.ux, self.uz, self.gamma = fields["ux"], fields["uz"], fields["gamma"]
-        self.push_mm = fields["push_mm"]
-        last = self.gamma[-1]
-        self.gamma_scale = float(np.nanpercentile(last, 99)) if np.isfinite(last).any() else 1.0
+        self.ux, self.uz = store.data["ux"], store.data["uz"]
+        self.push_mm = store.data["push_mm"]
+        self._scales: dict[str, float] = {}
+        self.undistort = None          # lens correction for the displayed photos (set by load)
 
     @classmethod
     def load(cls, project_path: str) -> "_Analysis":
         project = pipeline.load_project(project_path)
         folder = Path(project_path).parent
-        with np.load(folder / "results" / "fields.npz") as npz:
-            fields = {name: npz[name] for name in npz.files}
         bands = json.loads((folder / "results" / "bands.json").read_text())
         cal = project["calibration"]
         if project.get("kind") == "general":
@@ -102,7 +104,10 @@ class _Analysis:
             wall = WallFrame(float(cal["mm_per_px"]), float(cal["toe_px"][0]), float(cal["toe_px"][1]),
                              float(cal["wall_height_mm"]))
         seq = load_sequence(folder / project["images"].get("folder", "images"), project["images"].get("interval_s"))
-        return cls(project_path, fields, bands, list(seq.paths), wall)
+        analysis = cls(project_path, FieldStore(folder / "results"), bands, list(seq.paths), wall)
+        # The fields are in lens-corrected coordinates, so the photos are shown corrected too.
+        analysis.undistort = pipeline.lens_corrector(project)
+        return analysis
 
     def _index(self, x, z) -> np.ndarray:
         return np.stack([(np.ravel(z) - self.z0) / self.dz, (np.ravel(x) - self.x0) / self.dx])
@@ -114,23 +119,49 @@ class _Analysis:
         uz = ndimage.map_coordinates(fill_missing(self.uz[k]), idx, order=1, mode="nearest")
         return ux.reshape(np.shape(x)), uz.reshape(np.shape(x))
 
-    def overlay_level(self, k: int, shape: tuple[int, int], scale: float) -> np.ndarray:
-        """Strain level 0..1 at every display pixel of photo k (soil drawn where it is now)."""
-        rows, cols = np.mgrid[0:shape[0]:OVERLAY_STEP_PX, 0:shape[1]:OVERLAY_STEP_PX].astype(float)
-        x_now, z_now = self.wall.to_wall(cols / scale, rows / scale)
+    def reference_of(self, k: int, x_now: np.ndarray, z_now: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """Where material now at (x_now, z_now) in photo k was in the first photo (fixed-point inverse)."""
         ux, uz = fill_missing(self.ux[k]), fill_missing(self.uz[k])
         x_ref, z_ref = x_now, z_now
         for _ in range(INVERSE_MAP_ITERATIONS):
             idx = self._index(x_ref, z_ref)
-            x_ref = x_now - ndimage.map_coordinates(ux, idx, order=1, mode="nearest").reshape(x_now.shape)
-            z_ref = z_now - ndimage.map_coordinates(uz, idx, order=1, mode="nearest").reshape(x_now.shape)
+            x_ref = x_now - ndimage.map_coordinates(ux, idx, order=1, mode="nearest").reshape(np.shape(x_now))
+            z_ref = z_now - ndimage.map_coordinates(uz, idx, order=1, mode="nearest").reshape(np.shape(x_now))
+        return x_ref, z_ref
+
+    def value_at(self, key: str, k: int, x_ref, z_ref) -> np.ndarray:
+        """A quantity at reference positions (NaN where it was not measured)."""
+        field = self.store.get(key, k)
         idx = self._index(x_ref, z_ref)
-        gamma = self.gamma[k]
-        measured = ndimage.map_coordinates(np.isfinite(gamma).astype(float), idx, order=0, mode="constant", cval=0.0)
-        values = ndimage.map_coordinates(np.nan_to_num(gamma), idx, order=1, mode="constant", cval=0.0)
-        level = np.where(measured > 0.5, np.clip(values / max(self.gamma_scale, 1e-9), 0, 1), 0.0).reshape(x_now.shape)
+        measured = ndimage.map_coordinates(np.isfinite(field).astype(float), idx, order=0, mode="constant", cval=0.0)
+        values = ndimage.map_coordinates(np.nan_to_num(field), idx, order=1, mode="constant", cval=0.0)
+        return np.where(measured > 0.5, values, np.nan).reshape(np.shape(x_ref))
+
+    def near_edge(self, x_ref, z_ref) -> np.ndarray:
+        """True where the DIC subset reaches the object's outline (less reliable strain)."""
+        mask = self.store.data.get("near_edge")
+        if mask is None:
+            return np.zeros(np.shape(x_ref), dtype=bool)
+        idx = self._index(x_ref, z_ref)
+        return ndimage.map_coordinates(mask.astype(float), idx, order=0, mode="nearest").reshape(np.shape(x_ref)) > 0.5
+
+    def scale(self, key: str) -> float:
+        """Colour scale of a quantity: its 99th percentile magnitude in the last photo."""
+        if key not in self._scales:
+            last = np.abs(self.store.get(key, self.store.frames - 1))
+            self._scales[key] = float(np.nanpercentile(last, 99)) if np.isfinite(last).any() else 1.0
+            self._scales[key] = self._scales[key] or 1.0
+        return self._scales[key]
+
+    def overlay_level(self, k: int, shape: tuple[int, int], scale: float, key: str = "gamma") -> np.ndarray:
+        """Quantity level at every display pixel of photo k, -1..1 (signed) or 0..1, drawn where the material is now."""
+        rows, cols = np.mgrid[0:shape[0]:OVERLAY_STEP_PX, 0:shape[1]:OVERLAY_STEP_PX].astype(float)
+        x_now, z_now = self.wall.to_wall(cols / scale, rows / scale)
+        x_ref, z_ref = self.reference_of(k, x_now, z_now)
+        values = self.value_at(key, k, x_ref, z_ref)
+        level = np.nan_to_num(np.clip(values / self.scale(key), -1, 1))
         full = np.repeat(np.repeat(level, OVERLAY_STEP_PX, axis=0), OVERLAY_STEP_PX, axis=1)[:shape[0], :shape[1]]
-        return np.clip(ndimage.uniform_filter(full, OVERLAY_STEP_PX), 0.0, 1.0)
+        return np.clip(ndimage.uniform_filter(full, OVERLAY_STEP_PX), -1.0, 1.0)
 
 
 class Api:
@@ -239,6 +270,7 @@ class Api:
         types = {
             "sensor": ("Logger exports (*.csv;*.txt;*.tsv;*.xlsx;*.xls)", "All files (*.*)"),
             "calibration": ("Calibration run (*.csv;*.txt;*.xlsx)", "All files (*.*)"),
+            "image": ("Photos (*.tif;*.tiff;*.png;*.jpg;*.jpeg;*.bmp)", "All files (*.*)"),
             "project": ("StrainLink project (*.json)",),
             "video": ("Videos (*.mp4;*.mov;*.m4v;*.avi;*.mkv;*.mts;*.wmv)", "All files (*.*)"),
         }
@@ -267,6 +299,24 @@ class Api:
                 "duration_s": float(seq.times_s[-1]), "width": int(first.shape[1]), "height": int(first.shape[0]),
                 "first": _png_data_url(preview), "last": _png_data_url(last), "preview_scale": scale,
                 "first_name": seq.paths[0].name, "last_name": seq.paths[-1].name}
+
+    def calibrate_lens(self, path: str, square_mm: float | None = None) -> dict:
+        """Lens model from a photo of a checkerboard (found automatically); also the scale if the square size is given."""
+        from ..lens import GOOD_FIT_PX, calibrate
+        try:
+            model = calibrate([load_grayscale(path)], float(square_mm) if square_mm else None)
+        except (OSError, ValueError) as error:
+            return {"ok": False, "error": str(error)}
+        k1, k2 = (float(v) for v in model.distortion.ravel()[:2])
+        w, h = model.image_size
+        # How far the lens moves a photo corner: what the correction removes.
+        import cv2
+        corner = np.array([[[0.0, 0.0]]], np.float32)
+        moved = float(np.hypot(*(cv2.undistortPoints(corner, model.camera_matrix, model.distortion,
+                                                     P=model.camera_matrix).reshape(2) - corner.reshape(2))))
+        return {"ok": True, "lens": model.to_json(), "rms_px": model.rms_px, "k1": k1, "k2": k2,
+                "board": list(model.board), "corner_shift_px": moved, "mm_per_px": model.mm_per_px,
+                "good": model.rms_px <= GOOD_FIT_PX, "size": [w, h]}
 
     def preview_area(self, folder: str, roi_px: list | None = None) -> dict:
         """First photo with the automatically found object area outlined (any-test mode).
@@ -396,9 +446,9 @@ class Api:
         per_photo = per_photo.astype(object).where(per_photo.notna(), None).to_dict(orient="list")
         return {"ok": True, "summary": summary, "per_photo": per_photo}
 
-    def frame(self, project_path: str, k: int, show_strain: bool = True) -> dict:
-        """Photo k with the strain overlay and the band centrelines in display pixels."""
-        key = (project_path, int(k), bool(show_strain))
+    def frame(self, project_path: str, k: int, show_strain: bool = True, quantity: str = "gamma") -> dict:
+        """Photo k with a quantity's overlay and the band centrelines in display pixels."""
+        key = (project_path, int(k), bool(show_strain), quantity)
         if key in self._frame_cache:
             return self._frame_cache[key]
         # One frame at a time: overlapping requests (fast scrubbing, playback)
@@ -406,9 +456,14 @@ class Api:
         with self._frame_lock:
             if key in self._frame_cache:
                 return self._frame_cache[key]
-            result = self._render_frame(self._analysis(project_path), int(k), bool(show_strain))
+            result = self._render_frame(self._analysis(project_path), int(k), bool(show_strain), quantity)
             self._frame_cache[key] = result
             return result
+
+    def quantities(self) -> list[dict]:
+        """What the viewer and the inspection tools can show."""
+        return [{"key": q.key, "label": q.label, "unit": q.unit, "signed": q.signed, "percent": q.percent}
+                for q in QUANTITIES.values()]
 
     def _analysis(self, project_path: str) -> _Analysis:
         """Results of one analysis, loaded once and kept while it is being viewed."""
@@ -417,15 +472,19 @@ class Api:
         return self._viewed
 
     @staticmethod
-    def _render_frame(a: "_Analysis", k: int, show_strain: bool) -> dict:
-        photo = _to_8bit(load_grayscale(a.photo_paths[k]))
+    def _render_frame(a: "_Analysis", k: int, show_strain: bool, quantity: str = "gamma") -> dict:
+        raw = load_grayscale(a.photo_paths[k])
+        photo = _to_8bit(a.undistort(raw) if a.undistort else raw)
         display, scale = _downscale(photo)
         rgb = np.repeat(display[..., None], 3, axis=2).astype(float)
-        ux, uz, gamma = a.ux[k], a.uz[k], a.gamma[k]
-        if show_strain and np.isfinite(gamma).any():
-            level = a.overlay_level(k, display.shape, scale)
-            colour = np.stack([235 * np.ones_like(level), 60 + 80 * (1 - level), 40 + 60 * (1 - level)], axis=-1)
-            alpha = (OVERLAY_ALPHA * level ** 0.8)[..., None]
+        q = QUANTITIES.get(quantity, QUANTITIES["gamma"])
+        if show_strain and k > 0:
+            level = a.overlay_level(k, display.shape, scale, q.key)
+            # Positive: red; negative: blue; strength by magnitude.
+            red = np.array([235.0, 60.0, 40.0])
+            blue = np.array([40.0, 100.0, 235.0])
+            colour = np.where(level[..., None] >= 0, red, blue)
+            alpha = (OVERLAY_ALPHA * np.abs(level) ** 0.8)[..., None]
             rgb = rgb * (1 - alpha) + colour * alpha
         # Bands: reference positions (mm) -> current positions -> display pixels.
         disp_bands = []
@@ -440,7 +499,76 @@ class Api:
                                "points": np.column_stack([col * scale, row * scale]).round(1).tolist()})
         return {"image": _png_data_url(np.clip(rgb, 0, 255).astype(np.uint8)), "width": display.shape[1],
                 "height": display.shape[0], "bands": disp_bands, "push_mm": float(a.push_mm[k]),
-                "gamma_max": a.gamma_scale}
+                "gamma_max": a.scale("gamma"), "quantity": q.key, "quantity_label": q.label,
+                "quantity_scale": a.scale(q.key), "signed": q.signed, "percent": q.percent, "unit": q.unit,
+                "display_scale": scale}
+
+    # --- inspection tools (Vic-2D style) -----------------------------------------
+    def probe(self, project_path: str, kind: str, points: list, k: int, quantity: str = "exx",
+              display_scale: float = 1.0) -> dict:
+        """Point probe, line profile or virtual extensometer at points clicked on photo k (display px).
+
+        Clicked positions are mapped back to the material points in the first photo,
+        so a probe follows the same material through the test (Lagrangian).
+        """
+        a = self._analysis(project_path)
+        q = QUANTITIES.get(quantity, QUANTITIES["exx"])
+        cols = np.array([p[0] for p in points], float) / display_scale
+        rows = np.array([p[1] for p in points], float) / display_scale
+        x_now, z_now = a.wall.to_wall(cols, rows)
+        x_ref, z_ref = a.reference_of(int(k), x_now, z_now)
+        axis = [float(v) for v in a.push_mm]
+        frames = range(a.store.frames)
+        clean = lambda v: [None if not np.isfinite(x) else float(x) for x in np.ravel(v)]  # noqa: E731
+        if kind == "point":
+            # Like a small strain gauge: the mean over the 3 x 3 grid points around the spot
+            # (a single point carries the full measurement noise, ~3x more in testing).
+            ox, oz = np.meshgrid(np.array([-1, 0, 1]) * a.dx, np.array([-1, 0, 1]) * a.dz)
+            gx, gz = x_ref[0] + ox.ravel(), z_ref[0] + oz.ravel()
+            series = [float(np.nanmean(a.value_at(q.key, j, gx, gz))) for j in frames]
+            near_edge = a.near_edge(x_ref[:1], z_ref[:1])[0]
+            u = [a.displacement_at(j, x_ref[:1], z_ref[:1]) for j in frames]
+            return {"ok": True, "kind": kind, "axis": axis, "quantity": q.label, "unit": q.unit, "percent": q.percent,
+                    "values": clean(series), "ux": clean([v[0][0] for v in u]), "uz": clean([v[1][0] for v in u]),
+                    "point_mm": [float(x_ref[0]), float(z_ref[0])], "near_edge": bool(near_edge)}
+        if kind == "line":
+            t = np.linspace(0, 1, LINE_SAMPLES)
+            xs = x_ref[0] + t * (x_ref[1] - x_ref[0])
+            zs = z_ref[0] + t * (z_ref[1] - z_ref[0])
+            distance = t * float(np.hypot(x_ref[1] - x_ref[0], z_ref[1] - z_ref[0]))
+            return {"ok": True, "kind": kind, "distance_mm": clean(distance), "quantity": q.label, "unit": q.unit,
+                    "percent": q.percent, "values": clean(a.value_at(q.key, int(k), xs, zs)), "photo": int(k),
+                    "near_edge": [bool(v) for v in a.near_edge(xs, zs)]}
+        if kind == "extensometer":
+            lengths = []
+            for j in frames:
+                ux, uz = a.displacement_at(j, x_ref[:2], z_ref[:2])
+                lengths.append(float(np.hypot(x_ref[1] + ux[1] - x_ref[0] - ux[0], z_ref[1] + uz[1] - z_ref[0] - uz[0])))
+            l0 = float(np.hypot(x_ref[1] - x_ref[0], z_ref[1] - z_ref[0]))
+            return {"ok": True, "kind": kind, "axis": axis, "gauge_mm": l0, "length_mm": clean(lengths),
+                    "strain": clean(np.array(lengths) / l0 - 1.0)}
+        return {"ok": False, "error": f"unknown tool {kind}"}
+
+    def export_fields(self, project_path: str, fmt: str = "csv") -> dict:
+        """Every field of every photo, as CSV files or one MATLAB file, next to the results."""
+        from ..export import export
+        try:
+            path = export(Path(project_path).parent / "results", fmt)
+        except OSError as error:
+            return {"ok": False, "error": str(error)}
+        self.reveal(str(path))
+        return {"ok": True, "path": str(path)}
+
+    def save_probe(self, project_path: str, name: str, table: dict) -> dict:
+        """A probe's numbers as a CSV file in results/probes/."""
+        import pandas as pd
+        folder = Path(project_path).parent / "results" / "probes"
+        folder.mkdir(exist_ok=True)
+        safe = "".join(ch if ch.isalnum() or ch in "-_ " else "_" for ch in name).strip() or "probe"
+        path = folder / f"{safe}.csv"
+        pd.DataFrame(table).to_csv(path, index=False)
+        self.reveal(str(path))
+        return {"ok": True, "path": str(path)}
 
     def accuracy(self, project_path: str) -> dict:
         """Known-answer comparison for synthetic tests (those with a truth.json)."""

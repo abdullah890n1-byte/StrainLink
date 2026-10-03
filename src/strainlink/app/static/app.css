@@ -177,3 +177,13 @@ body.kind-general .wall-only { display: none !important; }
 .noteitem { margin: 10px 0; padding: 10px 14px; border-radius: 10px; background: var(--soft); color: var(--ink); font-size: 13.5px; }
 .marker-box { margin: 10px 0; } .marker-box .row { margin-top: 6px; display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
 #marker-check { margin-bottom: 18px; }
+/* Viewer: quantity shown and inspection tools (Vic-2D style probes). */
+.overlay-pick { display: flex; gap: 6px; margin: 8px 0 4px; } .overlay-pick select { flex: 1; min-width: 0; }
+.probe-tools { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; margin: 8px 0 2px; }
+.probe-tools button.on { background: var(--accent); color: #fff; }
+.stage-img.probing { cursor: crosshair; }
+.probe-panel { margin: 12px 0; padding: 10px 12px; border: 1px solid var(--line); border-radius: 12px; }
+.probe-head { display: flex; justify-content: space-between; align-items: center; }
+.resbtns select { border-radius: 9px; padding: 6px 8px; }
+.lens-box { margin: 10px 0; } .lens-box .row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+.warn-text { color: var(--warn); }

@@ -112,6 +112,12 @@
         </div>
         <div class="canvaswrap"><canvas id="cal-canvas"></canvas></div>
         <div class="row wall-only"><label class="inline">Retained soil height at the wall (effective height H) <input type="number" id="wall-h" value="390" min="0" step="any"> mm</label></div>
+        <div class="lens-box">
+          <div class="row"><button class="small" id="pick-grid">Lens correction (optional): calibration grid photo…</button>
+            <label class="inline small">square size <input type="number" id="grid-square" min="0" step="any" class="short" placeholder="mm"> mm</label>
+            <button class="link small hidden" id="clear-lens">remove</button></div>
+          <div id="lens-result" class="muted small">Photograph a checkerboard in the specimen's plane with the same camera, lens and focus: StrainLink removes the lens's distortion (like Vic-2D). Recommended for wide-angle lenses.</div>
+        </div>
         <div class="general-only marker-box">
           <label class="inline"><input type="checkbox" id="use-markers"> The object carries <b>markers</b> (dots, beads, stickers): use them to check DIC's accuracy on this test</label>
           <div id="marker-options" class="row hidden">
@@ -176,7 +182,7 @@
   <section id="view-results" class="view hidden">
     <div class="reshead">
       <div><h2 id="res-title"></h2><div id="res-meta" class="muted small"></div></div>
-      <div class="resbtns"><button id="btn-report" class="primary">Open report</button><button id="btn-finder">Show in Finder</button></div>
+      <div class="resbtns"><button id="btn-report" class="primary">Open report</button><select id="export-format" title="Every field of every photo, for other software"><option value="">Export data…</option><option value="csv">CSV (one file per photo)</option><option value="mat">MATLAB file (.mat)</option></select><button id="btn-finder">Show in Finder</button></div>
     </div>
     <div id="res-synthetic" class="synthetic hidden">SYNTHETIC DATA — a generated test with known answers, not a real experiment.</div>
     <div class="cards" id="res-cards"></div>
@@ -192,12 +198,21 @@
       <div class="viewer">
         <div class="stage-img"><img id="frame-img"><svg id="frame-svg"></svg><div id="frame-loading" class="loading hidden">Loading…</div></div>
         <aside class="frame-side">
-          <div class="controls"><button id="play" title="Play">▶</button><input type="range" id="scrub-soil" min="0" value="0"><label class="inline small"><input type="checkbox" id="show-strain" checked> Strain</label></div>
+          <div class="controls"><button id="play" title="Play">▶</button><input type="range" id="scrub-soil" min="0" value="0"><label class="inline small"><input type="checkbox" id="show-strain" checked> Overlay</label></div>
+          <label class="inline small overlay-pick">Show <select id="overlay-quantity"></select></label>
+          <div class="probe-tools"><span class="muted small">Inspect:</span>
+            <button class="small" data-probe="point" title="Click a spot: its history through the test">Point</button>
+            <button class="small" data-probe="line" title="Click two points: the profile along the line">Line</button>
+            <button class="small" data-probe="extensometer" title="Click two points: a virtual extensometer (change in length and strain)">Extensometer</button>
+            <button class="link small hidden" id="probe-clear">clear</button>
+          </div>
+          <div id="probe-hint" class="muted small"></div>
           <div id="frame-label" class="big-label"></div>
           <div id="frame-metrics" class="metrics"></div>
           <div id="legend" class="legend"></div>
         </aside>
       </div>
+      <div id="probe-panel" class="probe-panel hidden"><div class="probe-head"><b id="probe-title"></b><button id="probe-save" class="small">Save as CSV</button></div><div id="plot-probe" class="plot"></div></div>
       <div class="three"><div id="plot-len" class="plot small"></div><div id="plot-lift" class="plot small"></div><div id="plot-area" class="plot small"></div></div>
     </div>
     <div class="tab hidden" data-tab="findings"><p class="muted small">Graded by the strength of the evidence. Every statement is computed from your data; open a finding to see the numbers and the method.</p><div id="findings-list"></div></div>

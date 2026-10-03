@@ -90,6 +90,28 @@ class RunSummary:
     flags: list[str] = field(default_factory=list)
 
 
+def lens_corrector(project: dict):
+    """The lens correction of a project (calibration.lens, from a calibration-grid photo), or None."""
+    lens = project.get("calibration", {}).get("lens")
+    if not lens:
+        return None
+    from .lens import LensModel, Undistorter
+    return Undistorter(LensModel.from_json(lens))
+
+
+def corrected_images(project: dict, images):
+    """Photos corrected for the lens when the project has a lens model (otherwise unchanged)."""
+    undistort = lens_corrector(project)
+    if undistort is None:
+        return images
+    from .lens import CorrectedImages
+    try:
+        undistort(images[0])
+    except ValueError as error:
+        raise ProjectError(str(error)) from error
+    return CorrectedImages(images, undistort)
+
+
 def load_project(path: str | Path) -> dict:
     path = Path(path)
     try:
@@ -135,7 +157,7 @@ def _run_wall(project_path: str | Path, project: dict, progress: Progress | None
         raise ProjectError(f"No photos found: {error}. Choose the photo folder in the Photos step.") from error
     if len(sequence) < 2:
         raise ProjectError("At least two photos are needed (the first must show the soil before the push).")
-    images = LazyImages(sequence.paths)
+    images = corrected_images(project, LazyImages(sequence.paths))
 
     # 2. DIC.
     dic_cfg = project.get("dic", {})

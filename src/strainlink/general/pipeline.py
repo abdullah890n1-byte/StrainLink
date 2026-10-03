@@ -34,14 +34,17 @@ from ..dic import DICSettings, Grid, track_sequence
 from ..io.images import load_sequence
 from ..io.sensors import Channel
 from ..pipeline import (LazyImages, Progress, ProjectError, _clean, _json_default, _load_sensor_files, _resolve,
-                        load_project)
-from ..strain import compute_strain, fill_displacement_gaps
+                        corrected_images, load_project)
+from ..strain import compute_strain, fill_displacement_gaps, measures
 from .events import MODE_NAMES, channel_events, zone_events
 from .findings import formation_order, zone_growth
 from .region import object_mask
 from .zones import kinematics
 from ..markers import ColourBrightness, check_dic
 
+# Further strain measures stored per photo (strain.measures; y there is z here).
+_MEASURE_KEYS = {"eyy_eng": "ezz_eng", "almansi_yy": "almansi_zz", "almansi_xy": "almansi_xz"}
+MEASURES = ("exx_eng", "ezz_eng", "shear_eng", "almansi_xx", "almansi_zz", "almansi_xz", "von_mises", "rotation_deg")
 STAGES = ("Loading", "Measuring movement (DIC)", "Strain and localisation zones", "Reading sensors",
           "Matching clocks", "Correlation engine", "Saving results")
 # DIC defaults for any object: 31 px subsets on a 5 px grid, searching ±10 px
@@ -92,7 +95,7 @@ def run(project_path: str | Path, progress: Progress | None = None) -> dict:
         raise ProjectError(f"No photos found: {error}. Choose the photos or video in the first step.") from error
     if len(sequence) < 2:
         raise ProjectError("At least two photos are needed (the first must show the object before loading).")
-    images = LazyImages(sequence.paths)
+    images = corrected_images(project, LazyImages(sequence.paths))
     frame = image_frame(mm_per_px, images.shape)
     roi = project["calibration"].get("roi_px")
     try:
@@ -128,14 +131,15 @@ def run(project_path: str | Path, progress: Progress | None = None) -> dict:
     det = DetectionSettings(**{"min_width_mm": 2.0 * spacing, "max_width_mm": MAX_ZONE_WIDTH_FRACTION * size_mm,
                                "min_length_mm": MIN_ZONE_LENGTH_FRACTION * size_mm, "attach_tolerance_mm": 0.0,
                                **project.get("detection", {})})
-    fields = {k: np.full((n,) + grid.shape, np.nan) for k in ("ux", "uz", "gamma", "exx", "ezz", "exz", "e1")}
+    stored = ("ux", "uz", "gamma", "exx", "ezz", "exz", "e1", "e2") + MEASURES
+    fields = {k: np.full((n,) + grid.shape, np.nan) for k in stored}
     per_frame, kin = [], []
     for k in range(n):
         report(STAGES[2], k / n, f"Photo {k + 1} of {n}")
         ux, uz = frame.displacement_to_wall(tracked.field(k, "u"), tracked.field(k, "v"))
         fields["ux"][k], fields["uz"][k] = ux, uz
         if k == 0:
-            for name in ("gamma", "exx", "ezz", "exz", "e1"):
+            for name in stored[2:]:
                 fields[name][k] = np.where(inside.reshape(grid.shape), 0.0, np.nan)
             per_frame.append(detect_bands(np.zeros(grid.shape), x_mm, z_mm, None, det))
             kin.append({})
@@ -143,7 +147,9 @@ def run(project_path: str | Path, progress: Progress | None = None) -> dict:
         lost = (tracked.valid[1:k + 1].any(axis=0) & ~tracked.valid[k]).reshape(grid.shape)
         ux_f, uz_f, refilled = fill_displacement_gaps(ux, uz, lost)
         strain = compute_strain(ux_f, uz_f, spacing, -spacing, int(dic_cfg.get("strain_window", DEFAULT_STRAIN_WINDOW)))
-        fields["gamma"][k], fields["e1"][k] = strain.gamma_max, strain.e1
+        fields["gamma"][k], fields["e1"][k], fields["e2"][k] = strain.gamma_max, strain.e1, strain.e2
+        for name, values in measures(strain).items():
+            fields[_MEASURE_KEYS.get(name, name)][k] = values
         fields["exx"][k], fields["ezz"][k], fields["exz"][k] = strain.exx, strain.eyy, strain.exy
         found = detect_bands(strain.gamma_max, x_mm, z_mm, None, det, uz=uz_f, reconstructed=refilled)
         per_frame.append(found)
@@ -171,7 +177,8 @@ def run(project_path: str | Path, progress: Progress | None = None) -> dict:
         report(STAGES[2], 1.0, "Checking DIC against the markers")
         cfg = project["markers"]
         zone_mask = _zone_mask(per_frame[-1], x_mm, z_mm)
-        marker_images = ColourBrightness(sequence.paths) if cfg.get("channel") == "brightness" else images
+        marker_images = (corrected_images(project, ColourBrightness(sequence.paths)) if cfg.get("channel") == "brightness"
+                         else images)
         marker_result, marker_tracks = check_dic(
             marker_images, mask, gx.astype(float), gy.astype(float),
             fields["ux"] / mm_per_px, -fields["uz"] / mm_per_px, zone_mask, mm_per_px,
@@ -220,8 +227,13 @@ def run(project_path: str | Path, progress: Progress | None = None) -> dict:
 
     # 6. Save.
     report(STAGES[6], 0.0, "Writing results")
+    # Points whose subset reaches the object's outline: their strain is less reliable
+    # (the subset partly sees background); probes there say so.
+    outline_px = ndimage.distance_transform_edt(np.pad(mask, 1))[1:-1, 1:-1]
+    near_edge = outline_px[np.clip(np.round(gy).astype(int), 0, mask.shape[0] - 1)[:, None],
+                           np.clip(np.round(gx).astype(int), 0, mask.shape[1] - 1)[None, :]] < settings.subset_radius
     np.savez_compressed(out_dir / "fields.npz", x_mm=x_mm, z_mm=z_mm, push_mm=axis_values,
-                        valid=tracked.valid.reshape((n,) + grid.shape), **fields)
+                        valid=tracked.valid.reshape((n,) + grid.shape), near_edge=near_edge, **fields)
     (out_dir / "bands.json").write_text(json.dumps(_clean([
         [{"name": _track_name(tracks, k, b), "label": "zone", "mode": kin[k][id(b)].mode if id(b) in kin[k] else "",
           "points": b.points.round(3), "width_mm": b.width_mm, "flags": b.flags} for b in fb.bands]

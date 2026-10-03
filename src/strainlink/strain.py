@@ -179,3 +179,37 @@ def fill_displacement_gaps(
     u_new[rows_t, cols_t] = spsolve(matrix, rhs_u)
     v_new[rows_t, cols_t] = spsolve(matrix, rhs_v)
     return u_new, v_new, target
+
+
+def measures(strain: StrainField) -> dict[str, np.ndarray]:
+    """Further strain measures engineers use (Vic-2D offers them too), from the same gradients.
+
+    - engineering strains: change in length of a line along x (z) per unit
+      length, sqrt(C) - 1, and the engineering shear angle (change of a right angle);
+    - Euler-Almansi strain (current configuration): e = (I - B^-1) / 2, B = F F^T;
+    - von Mises equivalent strain from the Hencky principal strains, with the
+      out-of-plane strain from volume conservation (e3 = -(e1 + e2)):
+      e_vm = (2 / sqrt(3)) sqrt(e1^2 + e1 e2 + e2^2);
+    - rotation of the material (polar decomposition), degrees, counter-clockwise
+      in the x-z frame.
+    """
+    f11, f12, f21, f22 = 1.0 + strain.dudx, strain.dudy, strain.dvdx, 1.0 + strain.dvdy
+    c11 = f11**2 + f21**2
+    c22 = f12**2 + f22**2
+    c12 = f11 * f12 + f21 * f22
+    with np.errstate(invalid="ignore", divide="ignore"):
+        exx_eng = np.sqrt(c11) - 1.0
+        eyy_eng = np.sqrt(c22) - 1.0
+        shear_eng = np.arcsin(np.clip(c12 / np.sqrt(c11 * c22), -1.0, 1.0))
+        b11 = f11**2 + f12**2
+        b22 = f21**2 + f22**2
+        b12 = f11 * f21 + f12 * f22
+        det_b = b11 * b22 - b12**2
+        inv11, inv22, inv12 = b22 / det_b, b11 / det_b, -b12 / det_b
+        e1, e2 = strain.e1, strain.e2
+        return {
+            "exx_eng": exx_eng, "eyy_eng": eyy_eng, "shear_eng": shear_eng,
+            "almansi_xx": 0.5 * (1.0 - inv11), "almansi_yy": 0.5 * (1.0 - inv22), "almansi_xy": -0.5 * inv12,
+            "von_mises": (2.0 / np.sqrt(3.0)) * np.sqrt(e1**2 + e1 * e2 + e2**2),
+            "rotation_deg": np.degrees(np.arctan2(f21 - f12, f11 + f22)),
+        }
