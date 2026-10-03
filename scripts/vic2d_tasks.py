@@ -33,6 +33,10 @@ HOLE_R = 50.0
 # Points within this many grid steps of the measured area's edge are left out of strain scoring
 # (the strain window and the subset reach past the edge there).
 EDGE_STEPS = 4
+# Rings around the hole (in radii) for the edge check, in a sector around the line through the
+# hole's centre across the load, where the concentration is highest (Kirsch: 3 at the edge).
+HOLE_RINGS = ((1.0, 1.1), (1.1, 1.2), (1.2, 1.3), (1.3, 1.5), (1.5, 2.0))
+HOLE_SECTOR_DEG = 15.0
 # Tolerances.
 DISP_TOL_PX = {"clean": 0.05, "degraded": 0.15}
 STRAIN_TOL = {"clean": 2e-4, "degraded": 5e-4}       # RMS, absolute (200 / 500 µε)
@@ -162,9 +166,23 @@ def task_result(case, found, truth, X, Y, ok, f, k, measured) -> dict:
         peak_found = float(np.max(found["exx"][nearest])) / m["strain"]
         peak_true = float(np.max(truth["exx"][nearest])) / m["strain"]
         hole_ok = not measured[np.hypot(X - CENTRE[0], Y - CENTRE[1]) < 0.8 * m["radius_px"]].any()
+        # Right at the edge: every measured strain point (the general score leaves out the area's edges).
+        has_strain = np.isfinite(found["exx"])
+        # Angle from the line across the load (vertical in the photo), both above and below the hole.
+        across = np.degrees(np.abs(np.arctan2(X - CENTRE[0], np.abs(Y - CENTRE[1]))))
+        sector = across <= HOLE_SECTOR_DEG
+        rings = {}
+        for lo, hi in HOLE_RINGS:
+            sel = has_strain & sector & (r >= lo * m["radius_px"]) & (r < hi * m["radius_px"])
+            if sel.any():
+                rings[f"{lo}-{hi}"] = round(float(np.median(found["exx"][sel] / truth["exx"][sel])), 3)
+        nearest_r = float(r[has_strain].min() / m["radius_px"])
+        ring_text = ", ".join(f"{k}: {v:.2f}" for k, v in rings.items())
         return {"result": f"εxx near the hole / remote: {peak_found:.2f} (Kirsch at the same points {peak_true:.2f}; 3.00 at the edge); "
-                          f"found/true on the line 1.3–2.5 radii: {np.median(ratio):.3f}; hole left out: {'yes' if hole_ok else 'NO'}",
-                "task_ok": bool(abs(np.median(ratio) - 1) <= 0.05 and hole_ok), "strain_scale": 3.0}
+                          f"found/true on the line 1.3–2.5 radii: {np.median(ratio):.3f}; hole left out: {'yes' if hole_ok else 'NO'}; "
+                          f"nearest strain point {nearest_r:.2f} radii; found/Kirsch by ring (radii) {ring_text}",
+                "task_ok": bool(abs(np.median(ratio) - 1) <= 0.05 and hole_ok), "strain_scale": 3.0,
+                "hole_rings": rings, "nearest_strain_radii": nearest_r}
     if task == "bending":
         rows = ok & (np.abs(X - 300) <= 100)
         slope, intercept = np.polyfit(Y[rows], found["exx"][rows], 1)
@@ -199,6 +217,12 @@ def main() -> None:
         results.append(r)
         mark = {True: "PASS", False: "FAIL", None: "LIMIT"}[r["pass"]]
         print(f"{mark:5s} {case.name:13s} disp {r['disp_rms_px']:.4f} px  strain {r['strain_rms'] * 1e6:7.0f} µε  | {r.get('result', '')}", flush=True)
+    if args.only:
+        # A partial run updates its own cases and keeps the others' last results.
+        saved = REPORT / "vic2d_tasks.json"
+        previous = {r["case"]: r for r in json.loads(saved.read_text())} if saved.exists() else {}
+        previous.update({r["case"]: r for r in results})
+        results = [previous[c.name] for c in cases() if c.name in previous]
     (REPORT / "vic2d_tasks.json").write_text(json.dumps(results, indent=1))
     lines = ["| Case | Result | Displacement RMS (px) | Strain RMS (µε) | Task result |", "|---|---|---|---|---|"]
     for r in results:

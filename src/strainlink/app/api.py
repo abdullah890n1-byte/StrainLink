@@ -138,7 +138,7 @@ class _Analysis:
         return np.where(measured > 0.5, values, np.nan).reshape(np.shape(x_ref))
 
     def near_edge(self, x_ref, z_ref) -> np.ndarray:
-        """True where the DIC subset reaches the object's outline (less reliable strain)."""
+        """True where the DIC subset reaches the object's outline (a partial, edge-aware subset: noisier)."""
         mask = self.store.data.get("near_edge")
         if mask is None:
             return np.zeros(np.shape(x_ref), dtype=bool)

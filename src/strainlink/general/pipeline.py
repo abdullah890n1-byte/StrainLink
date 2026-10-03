@@ -31,6 +31,7 @@ from ..bands import DetectionSettings, detect_bands
 from ..bands.track import BandTrack, _secondary_tracks
 from ..calib import WallFrame
 from ..dic import DICSettings, Grid, track_sequence
+from ..dic.mask import MIN_FILL as MIN_SUBSET_FILL, SubsetMask
 from ..io.images import load_sequence
 from ..io.sensors import Channel
 from ..pipeline import (LazyImages, Progress, ProjectError, _clean, _json_default, _load_sensor_files, _resolve,
@@ -53,6 +54,7 @@ DEFAULT_SUBSET_RADIUS_PX = 15
 DEFAULT_STEP_PX = 5
 DEFAULT_SEARCH_RADIUS_PX = 10
 DEFAULT_STRAIN_WINDOW = 5
+EDGE_AWARE_STRAIN_ORDER = 2
 # Zone detection scaled to the object: widest zone and shortest zone as
 # fractions of the object's smaller dimension.
 MAX_ZONE_WIDTH_FRACTION = 0.25
@@ -68,6 +70,11 @@ MAX_EVENT_SAMPLES = 5000
 MARKER_WARNING_PX = 0.2
 # Clock offsets searched (as a fraction of the logger duration) and the fit's resolution.
 OFFSET_SEARCH_STEPS = 400
+# The typical strain needs at least this many points outside the zones (else all points are used).
+MIN_INTACT_POINTS = 25
+# Offsets whose fit is statistically as good as the best one: residual within this 95% bound for
+# one fitted parameter (chi-squared, 1 degree of freedom) of the best mean squared residual.
+OFFSET_CHI2_95 = 3.84
 
 
 def image_frame(mm_per_px: float, shape: tuple[int, int]) -> WallFrame:
@@ -110,18 +117,25 @@ def run(project_path: str | Path, progress: Progress | None = None) -> dict:
                            search_radius=int(dic_cfg.get("search_radius_px", DEFAULT_SEARCH_RADIUS_PX)),
                            reference_mode="incremental", update_every=1)
     rows, cols = np.nonzero(mask)
-    box = (int(cols.min()), int(rows.min()), int(cols.max()) + 1, int(rows.max()) + 1)
-    grid = Grid.over_roi(box, settings.step, settings.subset_radius)
-    # Subsets must lie on the object: centres at least half a subset inside its outline.
-    inner = ndimage.binary_erosion(mask, iterations=max(settings.subset_radius // 2, 1))
-    inside = inner[np.clip(grid.y.astype(int), 0, mask.shape[0] - 1), np.clip(grid.x.astype(int), 0, mask.shape[1] - 1)]
+    # Edge-aware subsets let points reach the object's own outline; only the photo's border keeps
+    # them a subset radius away (the integer search's template must fit inside the photo).
+    r = settings.subset_radius
+    box = (max(int(cols.min()), r), max(int(rows.min()), r),
+           min(int(cols.max()) + 1, mask.shape[1] - r), min(int(rows.max()) + 1, mask.shape[0] - r))
+    grid = Grid.over_roi(box, settings.step, 0)
+    # Edge-aware subsets use only the object's pixels, so points reach right up to holes and
+    # edges; each needs a fair share of its subset on the object.
+    on_object = mask[np.clip(grid.y.astype(int), 0, mask.shape[0] - 1), np.clip(grid.x.astype(int), 0, mask.shape[1] - 1)]
+    fill = SubsetMask(mask, grid.x.ravel(), grid.y.ravel(), settings.subset_radius).fill().reshape(grid.shape)
+    inside = on_object & (fill >= MIN_SUBSET_FILL)
     if inside.sum() < 25:
         raise ProjectError("The object is too small for DIC at this subset size. Use closer photos or a smaller subset.")
     grid = Grid(x=np.where(inside, grid.x, np.nan), y=np.where(inside, grid.y, np.nan))
     tracked = track_sequence(images, grid, settings,
-                             progress=lambda k, n: report(STAGES[1], k / n, f"Photo {k + 1} of {n + 1}"))
-    gx = np.arange(grid.shape[1]) * settings.step + box[0] + settings.subset_radius
-    gy = np.arange(grid.shape[0]) * settings.step + box[1] + settings.subset_radius
+                             progress=lambda k, n: report(STAGES[1], k / n, f"Photo {k + 1} of {n + 1}"),
+                             object_mask=mask)
+    gx = np.arange(grid.shape[1]) * settings.step + box[0]
+    gy = np.arange(grid.shape[0]) * settings.step + box[1]
     x_mm, z_mm = frame.to_wall(*np.meshgrid(gx, gy))
     spacing = settings.step * mm_per_px
 
@@ -146,7 +160,9 @@ def run(project_path: str | Path, progress: Progress | None = None) -> dict:
             continue
         lost = (tracked.valid[1:k + 1].any(axis=0) & ~tracked.valid[k]).reshape(grid.shape)
         ux_f, uz_f, refilled = fill_displacement_gaps(ux, uz, lost)
-        strain = compute_strain(ux_f, uz_f, spacing, -spacing, int(dic_cfg.get("strain_window", DEFAULT_STRAIN_WINDOW)))
+        # Edge-aware gradients (order 2): strain right up to holes and edges is not smoothed inwards.
+        strain = compute_strain(ux_f, uz_f, spacing, -spacing, int(dic_cfg.get("strain_window", DEFAULT_STRAIN_WINDOW)),
+                                order=EDGE_AWARE_STRAIN_ORDER)
         fields["gamma"][k], fields["e1"][k], fields["e2"][k] = strain.gamma_max, strain.e1, strain.e2
         for name, values in measures(strain).items():
             fields[_MEASURE_KEYS.get(name, name)][k] = values
@@ -190,7 +206,7 @@ def run(project_path: str | Path, progress: Progress | None = None) -> dict:
     report(STAGES[5], 0.0, "Finding and testing relationships")
     frames = pd.DataFrame({"photo": np.arange(1, n + 1), "time_s": sequence.times_s, timing["axis_label"]: axis_values})
     obj_cols = []
-    for label, values in _object_series(fields, ext, per_frame).items():
+    for label, values in _object_series(fields, ext, per_frame, x_mm, z_mm).items():
         frames[label] = values
         obj_cols.append(label)
     for name, values in series.items():
@@ -227,8 +243,8 @@ def run(project_path: str | Path, progress: Progress | None = None) -> dict:
 
     # 6. Save.
     report(STAGES[6], 0.0, "Writing results")
-    # Points whose subset reaches the object's outline: their strain is less reliable
-    # (the subset partly sees background); probes there say so.
+    # Points whose subset reaches the object's outline are measured with a partial (edge-aware)
+    # subset and a one-sided strain fit: unbiased but noisier. Probes there say so.
     outline_px = ndimage.distance_transform_edt(np.pad(mask, 1))[1:-1, 1:-1]
     near_edge = outline_px[np.clip(np.round(gy).astype(int), 0, mask.shape[0] - 1)[:, None],
                            np.clip(np.round(gx).astype(int), 0, mask.shape[1] - 1)[None, :]] < settings.subset_radius
@@ -317,10 +333,12 @@ def _timing(project: dict, frame_times: np.ndarray, table, ext: dict) -> dict:
         offset, sigma, source = float(cfg.get("offset_s", 0.0)), 0.0, "user" if "offset_s" in cfg else "assumed"
     else:
         dic = max(ext.values(), key=lambda v: np.nanmax(np.abs(v)) if np.isfinite(v).any() else 0.0)
-        offset, sigma = _fit_offset(frame_times - frame_times[0], dic, logger_t, table.values(disp))
+        offset, sigma, fit_range = _fit_offset(frame_times - frame_times[0], dic, logger_t, table.values(disp))
         source = "dic"
     at_frames = frame_times - frame_times[0] + offset
     sync = {"source": source, "clock_offset_s": offset, "offset_sigma_s": sigma, "logger_step_s": step}
+    if source == "dic":
+        sync.update(offset_range_s=list(fit_range[:2]), open_ended=fit_range[2])
     if disp is not None:
         axis = np.interp(at_frames, logger_t, table.values(disp), left=np.nan, right=np.nan)
         slope = np.nanmedian(np.abs(np.gradient(table.values(disp), logger_t))) if len(logger_t) > 2 else 0.0
@@ -333,7 +351,8 @@ def _timing(project: dict, frame_times: np.ndarray, table, ext: dict) -> dict:
             "logger_time_at_frames": at_frames, "offset_s": offset, "sync": sync}
 
 
-def _fit_offset(frame_t: np.ndarray, dic: np.ndarray, logger_t: np.ndarray, disp: np.ndarray) -> tuple[float, float]:
+def _fit_offset(frame_t: np.ndarray, dic: np.ndarray, logger_t: np.ndarray,
+                disp: np.ndarray) -> tuple[float, float, tuple[float, float, bool]]:
     """Logger time of the first photo, from DIC stretch = a * (logger displacement - its value at the first photo).
 
     DIC measures movement relative to the first photo, so the logger's
@@ -343,11 +362,16 @@ def _fit_offset(frame_t: np.ndarray, dic: np.ndarray, logger_t: np.ndarray, disp
     the loading rate (start, stops, unloading): during constant-rate loading
     any clock shift fits equally well. The uncertainty is therefore the
     half-width of the range of offsets that fit statistically as well as the
-    best one, combined with the first/second-half disagreement.
+    best one (95%), combined with the first/second-half disagreement, and
+    the estimate is the centre of that range.
+
+    Returns the offset, its uncertainty and that range (lowest, highest,
+    open-ended): open-ended when the range runs into the end of the search,
+    i.e. the photos cannot fix the clock on that side at all.
     """
     ok = np.isfinite(dic)
     if ok.sum() < 5 or np.ptp(dic[ok]) == 0:
-        return 0.0, float("nan")
+        return 0.0, float("nan"), (float("nan"), float("nan"), True)
     duration = float(logger_t[-1] - logger_t[0])
 
     def cost(offset: float, sel: np.ndarray = ok) -> float:
@@ -373,18 +397,26 @@ def _fit_offset(frame_t: np.ndarray, dic: np.ndarray, logger_t: np.ndarray, disp
         return float(refined), costs
 
     offset, costs = best(ok)
-    # Offsets whose fit is statistically as good (within 1/n of the best mean squared residual).
+    # Offsets whose fit is statistically as good as the best (95%, see OFFSET_CHI2_95).
     finite = np.isfinite(costs)
     minimum = float(np.min(costs[finite])) if finite.any() else np.inf
-    equal = grid[finite & (costs <= minimum * (1.0 + 1.0 / ok.sum()) + 1e-15)]
+    equal_mask = finite & (costs <= minimum * (1.0 + OFFSET_CHI2_95 / max(ok.sum() - 2, 1)) + 1e-15)
+    equal = grid[equal_mask]
     flatness = 0.5 * float(equal.max() - equal.min()) if len(equal) else 0.0
+    usable = np.flatnonzero(finite)
+    open_ended = bool(len(equal) and usable.size and (equal_mask[usable[0]] or equal_mask[usable[-1]]))
+    fit_range = (float(equal.min()), float(equal.max()), open_ended) if len(equal) else (offset, offset, False)
+    if len(equal):
+        # Offsets in that range fit equally well, so where the best fit falls inside it is noise:
+        # the centre of the range is the estimate with the smallest worst-case error.
+        offset = 0.5 * (fit_range[0] + fit_range[1])
     idx = np.flatnonzero(ok)
     first, second = np.zeros_like(ok), np.zeros_like(ok)
     first[idx[: len(idx) // 2]], second[idx[len(idx) // 2:]] = True, True
     halves = [best(h)[0] for h in (first, second) if h.sum() >= 5]
     spread = 0.5 * abs(halves[0] - halves[1]) if len(halves) == 2 else 0.0
     frame_step = float(np.median(np.diff(frame_t))) if len(frame_t) > 1 else 0.0
-    return offset, float(max(flatness, spread, 0.1 * frame_step))
+    return offset, float(max(flatness, spread, 0.1 * frame_step)), fit_range
 
 
 def _on_axis(timing: dict, table, values: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -430,16 +462,28 @@ def _zone_summaries(tracks: list[BandTrack], per_frame, kin, x, z, inside, n, sp
     return modes, series, crossing
 
 
-def _object_series(fields: dict, ext: dict, per_frame) -> dict[str, np.ndarray]:
+def _object_series(fields: dict, ext: dict, per_frame, x: np.ndarray, z: np.ndarray) -> dict[str, np.ndarray]:
     """Whole-object measures per photo: typical strain (a virtual strain gauge), extensometers, peak strains."""
     def over_object(name: str, how) -> np.ndarray:
         return np.array([how(f[np.isfinite(f)]) if np.isfinite(f).any() else np.nan for f in fields[name]])
-    # Median, not mean: it is the strain of the intact material. A zone's own
-    # jump (reported separately as its opening or slip) would dominate a mean.
+
+    # The typical strain is the strain of the intact material: each photo's zones are left out
+    # (a crack's jump, spread by the strain window, covered over a quarter of a small plate and
+    # pulled even a median up by 5%), and the median resists anything left.
+    intact = [~_zone_mask(fb, x, z) for fb in per_frame]
+
+    def typical(name: str) -> np.ndarray:
+        out = []
+        for f, keep in zip(fields[name], intact):
+            sel = np.isfinite(f) & keep
+            sel = sel if sel.sum() >= MIN_INTACT_POINTS else np.isfinite(f)
+            out.append(float(np.median(f[sel])) if sel.any() else np.nan)
+        return np.array(out)
+
     return {
-        "strain εxx": over_object("exx", np.median),
-        "strain εzz": over_object("ezz", np.median),
-        "shear strain εxz": over_object("exz", np.median),
+        "strain εxx": typical("exx"),
+        "strain εzz": typical("ezz"),
+        "shear strain εxz": typical("exz"),
         "peak shear strain γmax": over_object("gamma", lambda v: np.percentile(v, 99)),
         "peak major strain ε1": over_object("e1", lambda v: np.percentile(v, 99)),
         **ext,
@@ -448,7 +492,7 @@ def _object_series(fields: dict, ext: dict, per_frame) -> dict[str, np.ndarray]:
 
 
 def _zone_mask(frame_bands, x: np.ndarray, z: np.ndarray) -> np.ndarray:
-    """Grid points within one zone width of a zone's centreline (last photo)."""
+    """Grid points within one zone width of a zone's centreline (in one photo)."""
     mask = np.zeros(x.shape, dtype=bool)
     points = np.column_stack([x.ravel(), z.ravel()])
     for band in frame_bands.bands:
@@ -509,7 +553,13 @@ def _flags(per_frame, timing: dict, time_source: str, photo_paths=()) -> list[st
     if sync.get("source") == "dic" and np.isfinite(sync.get("offset_sigma_s", np.nan)):
         step = sync.get("logger_step_s", 0.0)
         frame_gap = float(np.nanmedian(np.diff(timing["logger_time_at_frames"]))) if len(timing["logger_time_at_frames"]) > 1 else 0.0
-        if frame_gap and sync["offset_sigma_s"] > 0.5 * frame_gap:
+        if sync.get("open_ended"):
+            lo, hi = sync["offset_range_s"]
+            flags.append(f"Photos could not be matched to the logger clock from the images: the loading rate does not "
+                         f"change while the photos are taken, so every clock offset from {lo:.1f} s to {hi:.1f} s fits "
+                         f"equally well (used: {sync['clock_offset_s']:.1f} s). Findings that depend on timing are "
+                         f"uncertain; enter the clock offset if it is known.")
+        elif frame_gap and sync["offset_sigma_s"] > 0.5 * frame_gap:
             flags.append(f"Photos are matched to the logger only within ±{sync['offset_sigma_s']:.2f} s "
                          f"(photos are {frame_gap:.2f} s apart).")
     review = sum(1 for fb in per_frame if any(b.flags for b in fb.bands))

@@ -880,11 +880,11 @@ async function runProbe() {
   let traces, layout, title;
   if (r.kind === "point") {
     title = `Point at (${fmt(r.point_mm[0], 2)}, ${fmt(r.point_mm[1], 2)}) mm: ${r.quantity} through the test`
-      + (r.near_edge ? " — ⚑ near the edge of the object: strain here is less reliable" : "");
+      + (r.near_edge ? " — ⚑ at the object's edge: measured with a partial subset, so noisier than inside" : "");
     traces = [{ x: r.axis, y: pct(r.values, r.percent), mode: "lines+markers", marker: { size: 4 }, name: r.quantity }];
     layout = plotLayout(axisLabel, r.quantity + (r.percent ? " (%)" : r.unit ? ` (${r.unit})` : ""));
   } else if (r.kind === "line") {
-    title = `Line profile of ${r.quantity}, photo ${r.photo + 1}` + (r.near_edge.some(Boolean) ? " — ⚑ the ends near the object's edge are less reliable" : "");
+    title = `Line profile of ${r.quantity}, photo ${r.photo + 1}` + (r.near_edge.some(Boolean) ? " — ⚑ the ends at the object's edge are measured with partial subsets, so noisier" : "");
     traces = [{ x: r.distance_mm, y: pct(r.values, r.percent), mode: "lines", name: r.quantity }];
     layout = plotLayout("Distance along the line (mm)", r.quantity + (r.percent ? " (%)" : r.unit ? ` (${r.unit})` : ""));
   } else {

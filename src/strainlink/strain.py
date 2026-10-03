@@ -22,6 +22,10 @@ from scipy import ndimage
 MIN_WINDOW_FILL = 0.6
 # Relative determinant floor for the 3x3 normal equations (degenerate layouts).
 MIN_RELATIVE_DETERMINANT = 1e-9
+# Edge-aware fit (order 2): a quadratic fit is used where the window is cut by an edge, if its
+# normal equations are at least this well determined relative to a window cut in half by a
+# straight edge; otherwise the plane fit stays.
+MIN_QUADRATIC_DETERMINANT = 0.25
 
 
 @dataclass
@@ -44,13 +48,29 @@ class StrainField:
 
 
 def displacement_gradients(
-    field: np.ndarray, spacing_x: float, spacing_y: float, window: int = 5
+    field: np.ndarray, spacing_x: float, spacing_y: float, window: int = 5, order: int = 1
 ) -> tuple[np.ndarray, np.ndarray]:
     """d(field)/dx and d(field)/dy on a regular grid.
 
     spacing_x: coordinate increment per column; spacing_y: per row (may be
     negative, e.g. when rows run downward but y points upward).
+
+    order 2 (edge-aware): where the window is cut by an edge or a gap, a
+    plane fit returns the gradient at the middle of the points it has, not
+    at the point itself, which smooths strain next to holes and edges. A
+    quadratic fit removes that bias. On a full window its gradient equals
+    the plane fit's exactly (odd and even terms are orthogonal there), so
+    only cut windows change.
     """
+    dx, dy = _plane_gradients(field, window)
+    if order == 2:
+        qx, qy, cut = _quadratic_gradients(field, window)
+        dx, dy = np.where(cut & np.isfinite(dx), qx, dx), np.where(cut & np.isfinite(dx), qy, dy)
+    return dx / spacing_x, dy / spacing_y
+
+
+def _plane_gradients(field: np.ndarray, window: int) -> tuple[np.ndarray, np.ndarray]:
+    """Plane-fit gradients per grid step."""
     if window < 3 or window % 2 == 0:
         raise ValueError("window must be an odd integer >= 3")
     half = window // 2
@@ -90,15 +110,52 @@ def displacement_gradients(
     )
     solution = np.full(rhs.shape, np.nan)
     solution[usable] = np.linalg.solve(normal[usable], rhs[usable][..., None])[..., 0]
-    return solution[..., 1] / spacing_x, solution[..., 2] / spacing_y
+    return solution[..., 1], solution[..., 2]
+
+
+def _quadratic_gradients(field: np.ndarray, window: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Quadratic-fit gradients per grid step where the window is cut, and where that fit is usable."""
+    half = window // 2
+    offsets = np.arange(-half, half + 1, dtype=np.float64)
+    oy, ox = np.meshgrid(offsets, offsets, indexing="ij")
+    terms = [np.ones_like(ox), ox, oy, ox * ox, ox * oy, oy * oy]
+    known = np.isfinite(field)
+    mask = known.astype(np.float64)
+    values = np.where(known, field, 0.0)
+
+    def local_sum(data: np.ndarray, kernel: np.ndarray) -> np.ndarray:
+        return ndimage.correlate(data, kernel, mode="constant", cval=0.0)
+
+    cut = known & (local_sum(mask, terms[0]) < window * window)
+    rows, cols = np.nonzero(cut)
+    if rows.size == 0:
+        return np.full(field.shape, np.nan), np.full(field.shape, np.nan), cut
+    normal = np.empty((rows.size, 6, 6))
+    for i in range(6):
+        for j in range(i, 6):
+            normal[:, i, j] = normal[:, j, i] = local_sum(mask, terms[i] * terms[j])[rows, cols]
+    rhs = np.stack([local_sum(values, t)[rows, cols] for t in terms], -1)
+    # Reference: the same window cut in half by a straight edge (rows 0..half kept).
+    keep = oy >= 0
+    reference = np.array([[np.sum((terms[i] * terms[j])[keep]) for j in range(6)] for i in range(6)])
+    usable = np.linalg.det(normal) > MIN_QUADRATIC_DETERMINANT * np.linalg.det(reference)
+    gx, gy = np.full(field.shape, np.nan), np.full(field.shape, np.nan)
+    if usable.any():
+        sol = np.linalg.solve(normal[usable], rhs[usable][..., None])[..., 0]
+        gx[rows[usable], cols[usable]], gy[rows[usable], cols[usable]] = sol[:, 1], sol[:, 2]
+    cut[rows[~usable], cols[~usable]] = False
+    return gx, gy, cut
 
 
 def compute_strain(
-    u: np.ndarray, v: np.ndarray, spacing_x: float, spacing_y: float, window: int = 5
+    u: np.ndarray, v: np.ndarray, spacing_x: float, spacing_y: float, window: int = 5, order: int = 1
 ) -> StrainField:
-    """Strain from displacement components u (along x) and v (along y) on a grid."""
-    dudx, dudy = displacement_gradients(u, spacing_x, spacing_y, window)
-    dvdx, dvdy = displacement_gradients(v, spacing_x, spacing_y, window)
+    """Strain from displacement components u (along x) and v (along y) on a grid.
+
+    order 2: edge-aware gradients (see displacement_gradients).
+    """
+    dudx, dudy = displacement_gradients(u, spacing_x, spacing_y, window, order)
+    dvdx, dvdy = displacement_gradients(v, spacing_x, spacing_y, window, order)
 
     # Right Cauchy-Green tensor C = F^T F with F = I + grad(u).
     f11, f12, f21, f22 = 1.0 + dudx, dudy, dvdx, 1.0 + dvdy

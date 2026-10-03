@@ -29,10 +29,14 @@ MAX_FILLED_HOLE_WINDOWS = 2.0
 FINE_WINDOW_PX = 9
 FINE_FRACTION = 0.2
 FINE_CLOSING_PX = 4
+# Smoothing of the photo before the Laplacian in texture() (px), and how far that pair spreads a
+# sharp grey-level step (2 sigma + the Laplacian's 1 px).
+TEXTURE_SMOOTHING_PX = 1.0
+LAPLACE_REACH_PX = int(round(2 * TEXTURE_SMOOTHING_PX + 1))
 
 
 def texture(image: np.ndarray, window: int = TEXTURE_WINDOW_PX) -> np.ndarray:
-    lap = ndimage.laplace(ndimage.gaussian_filter(np.asarray(image, float), 1.0))
+    lap = ndimage.laplace(ndimage.gaussian_filter(np.asarray(image, float), TEXTURE_SMOOTHING_PX))
     mean = ndimage.uniform_filter(lap, window)
     return np.sqrt(np.maximum(ndimage.uniform_filter(lap**2, window) - mean**2, 0.0))
 
@@ -68,8 +72,10 @@ def _sharpen_outline(image: np.ndarray, coarse: np.ndarray) -> np.ndarray:
     about half a window (~15 px): near a hole or the specimen's edge it
     reached into the plain background, and subsets there saw background
     that does not move (strain 14% low next to a hole in testing). A small
-    window places the edge to within a grain or two; inside the object its
-    gaps (plain grain interiors) are closed again.
+    window, pulled back by the distance the edge's own grey-level step
+    reads as texture, places the edge just inside the object (by up to a
+    few px); inside the object its gaps (plain grain interiors) are closed
+    again.
     """
     fine_level = texture(image, FINE_WINDOW_PX)
     typical = float(np.percentile(fine_level[coarse], TYPICAL_PERCENTILE)) if coarse.any() else 0.0
@@ -77,4 +83,9 @@ def _sharpen_outline(image: np.ndarray, coarse: np.ndarray) -> np.ndarray:
     fine = ndimage.binary_closing(fine, iterations=FINE_CLOSING_PX)
     from skimage.morphology import remove_small_holes
     fine = remove_small_holes(fine, max_size=int(MAX_FILLED_HOLE_WINDOWS * TEXTURE_WINDOW_PX**2))
+    # The object's edge is itself a strong grey-level step, so the texture stays high past it by
+    # half a window plus the smoothing/Laplacian reach (8 px measured at a drilled hole): pull the
+    # outline back by that much. It then errs slightly inside the object, which edge-aware
+    # subsets need (background pixels inside a subset bias it; a missing pixel or two do not).
+    fine &= ndimage.distance_transform_edt(fine) > FINE_WINDOW_PX // 2 + LAPLACE_REACH_PX
     return ndimage.binary_opening(coarse & fine, iterations=2)

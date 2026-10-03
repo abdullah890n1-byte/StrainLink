@@ -19,6 +19,7 @@ from scipy import ndimage
 from .icgn import ICGNSettings, refine
 from .image import SplineImage
 from .initial import integer_search
+from .mask import SubsetMask
 
 ReferenceMode = Literal["fixed", "incremental"]
 # Re-seeding looks at this square neighbourhood (grid points) and needs at least
@@ -105,25 +106,32 @@ def correlate_pair(
     settings: DICSettings,
     prior_u: np.ndarray | None = None,
     prior_v: np.ndarray | None = None,
+    subset_mask: SubsetMask | None = None,
+    point_ids: np.ndarray | None = None,
 ) -> PairResult:
     """Sub-pixel displacement of subsets centred at the given reference positions.
 
-    Centres that are NaN (points lost earlier) are returned invalid.
+    Centres that are NaN (points lost earlier) are returned invalid. With
+    subset_mask, subsets are edge-aware (point_ids: each centre's point
+    index in the mask; default 0..N-1).
     """
     n = centres_x.size
+    if subset_mask is not None and point_ids is None:
+        point_ids = np.arange(n)
     known = np.isfinite(centres_x) & np.isfinite(centres_y)
     if not np.all(known):
         sub = correlate_pair(
             reference, current, centres_x[known], centres_y[known], settings,
             None if prior_u is None else prior_u[known],
             None if prior_v is None else prior_v[known],
+            subset_mask, None if point_ids is None else point_ids[known],
         )
         return _scatter(sub, known, n)
 
     radius = settings.subset_radius
     u0, v0, _ = integer_search(
         reference.pixels, current.pixels, centres_x, centres_y,
-        radius, settings.search_radius, prior_u, prior_v,
+        radius, settings.search_radius, prior_u, prior_v, subset_mask, point_ids,
     )
     searchable = np.isfinite(u0)
     # Rounded template centres shift the integer estimate by the fractional part;
@@ -134,7 +142,7 @@ def correlate_pair(
     initial = np.zeros((centres_x.size, 6))
     initial[:, 0] = np.nan_to_num(u0)
     initial[:, 3] = np.nan_to_num(v0)
-    result = refine(reference, current, centres_x, centres_y, initial, radius, settings.icgn)
+    result = refine(reference, current, centres_x, centres_y, initial, radius, settings.icgn, subset_mask, point_ids)
 
     zncc = np.where(searchable, result.zncc, np.nan)
     valid = searchable & result.converged & (np.nan_to_num(zncc) >= settings.min_zncc)
@@ -160,8 +168,13 @@ def track_sequence(
     grid: Grid,
     settings: DICSettings | None = None,
     progress: Callable[[int, int], None] | None = None,
+    object_mask: np.ndarray | None = None,
 ) -> TrackingResult:
-    """Track the grid's material points through all images (images[0] = undeformed)."""
+    """Track the grid's material points through all images (images[0] = undeformed).
+
+    object_mask (bool, first image): edge-aware subsets, matched on the
+    object's pixels only (see dic.mask).
+    """
     settings = settings or DICSettings()
     n_frames = len(images)
     n_points = grid.x.size
@@ -173,6 +186,8 @@ def track_sequence(
     zncc[0], valid[0] = 1.0, True
     reference_frames = [0]
 
+    subset_mask = (None if object_mask is None
+                   else SubsetMask(object_mask, grid.x.ravel(), grid.y.ravel(), settings.subset_radius))
     ref_index = 0
     reference = SplineImage.from_array(images[0])
     for k in range(1, n_frames):
@@ -183,7 +198,7 @@ def track_sequence(
         # Prior = motion accumulated since the reference (previous frame's result).
         prior_u = xs[k - 1] - ref_x
         prior_v = ys[k - 1] - ref_y
-        pair = correlate_pair(reference, current, ref_x, ref_y, settings, prior_u, prior_v)
+        pair = correlate_pair(reference, current, ref_x, ref_y, settings, prior_u, prior_v, subset_mask)
         still_tracked = np.isfinite(ref_x) & pair.valid
         xs[k] = np.where(still_tracked, ref_x + pair.u, np.nan)
         ys[k] = np.where(still_tracked, ref_y + pair.v, np.nan)
@@ -192,6 +207,8 @@ def track_sequence(
         reference_frames.append(ref_index)
 
         if settings.reference_mode == "incremental" and _should_update(k, ref_index, pair, settings):
+            if subset_mask is not None:
+                subset_mask.update(pair.params, still_tracked)
             ref_index = k
             reference = SplineImage.from_array(images[k])
         if progress:
