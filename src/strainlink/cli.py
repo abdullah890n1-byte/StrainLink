@@ -20,7 +20,7 @@ def _progress(stage: str, fraction: float, message: str, _last=[0.0]) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="strainlink", description="Geotechnical DIC with sensor fusion and correlation.")
+    parser = argparse.ArgumentParser(prog="strainlink", description="DIC for any test (soil, concrete, metals, rubber, ...) with sensor fusion and correlation.")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("app", help="open the desktop app")
     run = sub.add_parser("run", help="analyse a project (project.json)")
@@ -31,6 +31,9 @@ def main(argv: list[str] | None = None) -> int:
     demo.add_argument("--preset", choices=["loose", "medium", "dense"], default="medium")
     rep = sub.add_parser("report", help="rebuild the HTML report of an analysed project")
     rep.add_argument("project")
+    exp = sub.add_parser("export", help="export every field of every photo (CSV files or one MATLAB file)")
+    exp.add_argument("project")
+    exp.add_argument("--format", choices=["csv", "mat"], default="csv")
     chk = sub.add_parser("check", help="compare an analysed synthetic test with its known answers")
     chk.add_argument("project")
     args = parser.parse_args(argv)
@@ -68,6 +71,10 @@ def main(argv: list[str] | None = None) -> int:
             print(f"{'OK ' if c['ok'] else 'XX '} {c['item']:<58} found {c['found']:<28} true {c['true']:<24} {c['error']}")
         print(f"\n{result['passed']} of {result['total']} checks within tolerance.")
         return 0 if result["passed"] == result["total"] else 1
+    if args.command == "export":
+        from .export import export
+        print(export(Path(args.project).parent / "results", args.format))
+        return 0
     if args.command == "report":
         from . import report
         print(report.build(Path(args.project).parent / "results"))
