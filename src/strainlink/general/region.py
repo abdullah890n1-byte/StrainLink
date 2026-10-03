@@ -24,12 +24,17 @@ OUTLINE_SMOOTHING_PX = 5
 # Gaps inside the object smaller than this many texture windows (~subsets) are filled; larger ones
 # are real holes (a drilled hole, a notch) and stay out of the measured area.
 MAX_FILLED_HOLE_WINDOWS = 2.0
+# Outline refinement: texture over this small window (px), at this fraction of its typical level;
+# grain-scale gaps it leaves inside the object are closed over this many px.
+FINE_WINDOW_PX = 9
+FINE_FRACTION = 0.2
+FINE_CLOSING_PX = 4
 
 
-def texture(image: np.ndarray) -> np.ndarray:
+def texture(image: np.ndarray, window: int = TEXTURE_WINDOW_PX) -> np.ndarray:
     lap = ndimage.laplace(ndimage.gaussian_filter(np.asarray(image, float), 1.0))
-    mean = ndimage.uniform_filter(lap, TEXTURE_WINDOW_PX)
-    return np.sqrt(np.maximum(ndimage.uniform_filter(lap**2, TEXTURE_WINDOW_PX) - mean**2, 0.0))
+    mean = ndimage.uniform_filter(lap, window)
+    return np.sqrt(np.maximum(ndimage.uniform_filter(lap**2, window) - mean**2, 0.0))
 
 
 def object_mask(image: np.ndarray, roi_px: tuple[int, int, int, int] | None = None) -> np.ndarray:
@@ -52,4 +57,24 @@ def object_mask(image: np.ndarray, roi_px: tuple[int, int, int, int] | None = No
     # not part of the object and must stay out (filling every hole measured inside it).
     from skimage.morphology import remove_small_holes
     closed = ndimage.binary_closing(mask, iterations=OUTLINE_SMOOTHING_PX)
-    return remove_small_holes(closed, max_size=int(MAX_FILLED_HOLE_WINDOWS * TEXTURE_WINDOW_PX**2))
+    coarse = remove_small_holes(closed, max_size=int(MAX_FILLED_HOLE_WINDOWS * TEXTURE_WINDOW_PX**2))
+    return _sharpen_outline(image, coarse)
+
+
+def _sharpen_outline(image: np.ndarray, coarse: np.ndarray) -> np.ndarray:
+    """Refine the outline with a small texture window.
+
+    The coarse mask uses a subset-sized window, so its outline is blurred by
+    about half a window (~15 px): near a hole or the specimen's edge it
+    reached into the plain background, and subsets there saw background
+    that does not move (strain 14% low next to a hole in testing). A small
+    window places the edge to within a grain or two; inside the object its
+    gaps (plain grain interiors) are closed again.
+    """
+    fine_level = texture(image, FINE_WINDOW_PX)
+    typical = float(np.percentile(fine_level[coarse], TYPICAL_PERCENTILE)) if coarse.any() else 0.0
+    fine = fine_level > FINE_FRACTION * typical
+    fine = ndimage.binary_closing(fine, iterations=FINE_CLOSING_PX)
+    from skimage.morphology import remove_small_holes
+    fine = remove_small_holes(fine, max_size=int(MAX_FILLED_HOLE_WINDOWS * TEXTURE_WINDOW_PX**2))
+    return ndimage.binary_opening(coarse & fine, iterations=2)

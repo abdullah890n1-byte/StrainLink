@@ -95,6 +95,7 @@ function setKind(kind) {
 $$("#kind-choice button").forEach((b) => b.onclick = () => setKind(b.dataset.kind));
 const STEP_COUNT = 4;
 function startWizard() {
+  state.lens = null; $("#clear-lens").classList.add("hidden");
   Object.assign(state, { step: 0, photos: null, photosFolder: "", video: null, interval: null, sensors: null, sensorPath: "", calPath: "",
     channels: [], cal: { points: [], toe: null, tool: "scale" }, testFolder: "" });
   $("#found").classList.add("hidden"); $("#dropzone").classList.remove("hidden", "compact");
@@ -355,6 +356,22 @@ document.addEventListener("mouseup", () => {
   drawCalibration.redraw && drawCalibration.redraw(); loadArea();
 });
 $("#use-markers").onchange = () => $("#marker-options").classList.toggle("hidden", !$("#use-markers").checked);
+// Lens correction from a calibration-grid photo (checkerboard, found automatically).
+$("#pick-grid").onclick = async () => {
+  const f = await api().choose("image", state.testFolder); if (!f) return;
+  $("#lens-result").textContent = "Finding the checkerboard and fitting the lens…";
+  const r = await api().calibrate_lens(f, +$("#grid-square").value || null);
+  if (!r.ok) { $("#lens-result").textContent = r.error; return; }
+  state.lens = r.lens;
+  $("#clear-lens").classList.remove("hidden");
+  $("#lens-result").innerHTML = `<span class="${r.good ? "" : "warn-text"}">Lens fitted from a ${r.board[0] + 1} × ${r.board[1] + 1} board: fit ${fmt(r.rms_px, 3)} px RMS${r.good ? "" : " (poor: retake the grid photo sharper and filling the frame)"}. `
+    + `The correction moves the photo corners by ${fmt(r.corner_shift_px, 1)} px.</span>`
+    + (r.mm_per_px ? ` Scale from the grid: <b>${fmt(r.mm_per_px, 5)} mm/px</b> <button class="link small" id="use-grid-scale">use it</button>` : "");
+  const use = $("#use-grid-scale");
+  if (use) use.onclick = () => { $("#scale-direct").value = r.mm_per_px.toFixed(6); drawCalibration.redraw && drawCalibration.redraw(); updateNav(); };
+};
+$("#clear-lens").onclick = () => { state.lens = null; $("#clear-lens").classList.add("hidden");
+  $("#lens-result").textContent = "No lens correction: the lens is assumed undistorted."; };
 $("#clear-area").onclick = () => { state.cal.box = null; $("#clear-area").classList.add("hidden"); drawCalibration.redraw && drawCalibration.redraw(); loadArea(); };
 function mmPerPx() {
   const direct = +$("#scale-direct").value;
@@ -407,7 +424,7 @@ function buildProject() {
       kind: "general", name: $("#proj-name").value || "Untitled test",
       images: { folder: state.photosFolder, ...(state.interval ? { interval_s: state.interval } : {}),
                 ...(state.video ? { video: state.video.path, video_every_s: state.video.every_s } : {}) },
-      calibration: { mm_per_px: mmpp, ...(roiPx() ? { roi_px: roiPx() } : {}) },
+      calibration: { mm_per_px: mmpp, ...(roiPx() ? { roi_px: roiPx() } : {}), ...(state.lens ? { lens: state.lens } : {}) },
       ...($("#use-markers").checked ? { markers: { polarity: $("#marker-polarity").value === "bright" ? "bright" : "dark",
         ...($("#marker-polarity").value === "dark-colour" ? { channel: "brightness" } : {}),
         diameter_px: [0.7 * +$("#marker-size").value, 1.6 * +$("#marker-size").value] } } : {}),
@@ -423,7 +440,8 @@ function buildProject() {
               ...(state.video ? { video: state.video.path, video_every_s: state.video.every_s } : {}) },
     sensors: { file: state.sensorPath, ...(state.calPath ? { calibration_file: state.calPath } : {}),
       channels: state.channels.map((c) => ({ column: c.column, role: c.role, unit: c.unit, factor: FACTORS[c.unit] || 1, name: c.name, confidence: 1 })) },
-    calibration: { mm_per_px: mmpp, toe_px: [state.cal.toe[0] / s, state.cal.toe[1] / s], wall_height_mm: +$("#wall-h").value },
+    calibration: { mm_per_px: mmpp, toe_px: [state.cal.toe[0] / s, state.cal.toe[1] / s], wall_height_mm: +$("#wall-h").value,
+      ...(state.lens ? { lens: state.lens } : {}) },
     test: { unit_weight_kn_m3: +$("#gamma").value, wall_width_mm: +$("#wall-w").value, cell_depths_mm: cellDepths,
       ...($("#wall-weight").value ? { wall_weight_kn: +$("#wall-weight").value } : {}) },
     sync: { mode: syncMode(), ...(syncMode() === "offset" ? { offset_s: +$("#sync-offset").value } : {}), ...(syncMode() === "push-step" ? { push_step_mm: +$("#sync-step").value } : {}) },
@@ -431,13 +449,15 @@ function buildProject() {
   return project;
 }
 function fillReview() {
+  const lensItem = ["Lens", state.lens ? `corrected (fit ${fmt(state.lens.rms_px, 3)} px)` : "not corrected"];
   const items = isGeneral() ? [["Test", $("#proj-name").value || "Untitled test"], ["Kind", "Any object or test"],
     ["Photos", state.photos ? `${state.photos.count} ${state.video ? "frames from the video" : "photos"}` : null],
     ["Data-logger file", state.sensorPath ? state.sensorPath.split("/").pop() : { warn: "none — the object is measured, but there is nothing to correlate with" }],
     ["Scale", mmPerPx() ? `${mmPerPx().toFixed(4)} mm/px` : null], ["Measured area", roiPx() ? "found automatically, limited to your box" : "found automatically"],
+    lensItem,
     ["Accuracy check", $("#use-markers").checked ? `markers (${$("#marker-polarity").value}, ~${$("#marker-size").value} px)` : { warn: "no markers — accuracy on this test can't be measured directly" }],
     ["Clock matching", state.sensorPath ? (syncMode() === "offset" ? "known offset" : "automatic") : "not needed"]] : [["Test", $("#proj-name").value || null], ["Photos", state.photos ? `${state.photos.count} photos` : null], ["Data-logger file", state.sensorPath ? state.sensorPath.split("/").pop() : null],
-    ["Calibration run", state.calPath ? state.calPath.split("/").pop() : { warn: "none — forces will include base friction" }], ["Scale", mmPerPx() ? `${mmPerPx().toFixed(4)} mm/px` : null],
+    ["Calibration run", state.calPath ? state.calPath.split("/").pop() : { warn: "none — forces will include base friction" }], ["Scale", mmPerPx() ? `${mmPerPx().toFixed(4)} mm/px` : null], lensItem,
     ["Wall toe", state.cal.toe ? "set" : null], ["Unit weight", $("#gamma").value ? `${$("#gamma").value} kN/m³` : null], ["Clock matching", { dic: "automatic", offset: "known offset", "push-step": "photo every fixed push" }[syncMode()]]];
   $("#review-list").innerHTML = items.map(([k, v]) => {
     const cls = !v ? "missing" : v.warn ? "caution" : "ok";
@@ -495,6 +515,8 @@ async function openResults(path) {
   const r = await api().results(path);
   if (!r.ok) return toast(r.error);
   stopPlay(); state.projectPath = path; state.results = r; state.frameCache = {}; state.frameQueue = null; state.frame = 0;
+  state.probe = null; state.quantity = "gamma"; $("#probe-panel").classList.add("hidden"); $$("[data-probe]").forEach((x) => x.classList.remove("on"));
+  fillQuantities();
   const s = r.summary;
   show("results", s.project);
   $("#res-title").textContent = s.project;
@@ -727,8 +749,8 @@ function frameSideGeneral(f, k, showStrain) {
     ...(s.sensor_columns || []).slice(0, 4).map((c) => metric(c, fmt(pp[c] ? pp[c][k] : null, 3))),
   ].join("");
   const modes = [...new Set(f.bands.map((b) => b.mode || ""))];
-  $("#legend").innerHTML = (modes.length ? modes : ["opening", "shear"]).map((m) => `<div><i style="background:${MODE_COLOURS[m]}"></i>${MODE_NAMES[m]}</div>`).join("")
-    + (showStrain ? `<div>Strain overlay: red = high shear strain (up to ${fmt(f.gamma_max, 3)})</div>` : "");
+  $("#legend").innerHTML = modes.map((m) => `<div><i style="background:${MODE_COLOURS[m]}"></i>${MODE_NAMES[m]}</div>`).join("")
+    + (showStrain ? overlayLegend(f) : "");
   drawBandPlots();
 }
 $("#scrub-overview").oninput = (e) => { state.frame = +e.target.value; $("#scrub-soil").value = state.frame; drawOverview(); };
@@ -750,9 +772,10 @@ function drawBandPlots() {
 // pile up during playback and freeze the viewer), and a failed request is
 // dropped from the cache so it can be retried.
 function fetchFrame(k, showStrain) {
-  const key = `${k}:${showStrain}`;
+  const quantity = state.quantity || "gamma";
+  const key = `${k}:${showStrain}:${quantity}`;
   if (!state.frameCache[key]) {
-    const request = (state.frameQueue || Promise.resolve()).catch(() => {}).then(() => api().frame(state.projectPath, k, showStrain));
+    const request = (state.frameQueue || Promise.resolve()).catch(() => {}).then(() => api().frame(state.projectPath, k, showStrain, quantity));
     state.frameQueue = request;
     state.frameCache[key] = request.catch((e) => { delete state.frameCache[key]; throw e; });
   }
@@ -770,11 +793,13 @@ async function showFrame(k) {
   if (state.frame !== k) return false;
   $("#frame-loading").classList.add("hidden");
   $("#frame-img").src = f.image;
+  state.lastFrame = f;
   const svg = $("#frame-svg"); svg.setAttribute("viewBox", `0 0 ${f.width} ${f.height}`); svg.setAttribute("preserveAspectRatio", "none");
   const colour = (b) => b.label === "zone" ? MODE_COLOURS[b.mode || ""] : css(BAND_COLOURS[b.label]);
   const title = (b) => b.label === "zone" ? MODE_NAMES[b.mode || ""] : BAND_NAMES[b.label];
   svg.innerHTML = f.bands.map((b) => `<polyline points="${b.points.map((p) => p.join(",")).join(" ")}" fill="none" stroke="${colour(b)}" stroke-width="3" stroke-linecap="round" opacity=".95"><title>${esc(b.name)} — ${esc(title(b))}</title></polyline>
     <text x="${b.points[b.points.length - 1][0] + 6}" y="${b.points[b.points.length - 1][1]}" fill="${colour(b)}" font-size="15" font-weight="700" paint-order="stroke" stroke="#000" stroke-width="3">${esc(b.name)}</text>`).join("");
+  drawProbeMarks();
   if (isGeneral()) { frameSideGeneral(f, k, showStrain); return true; }
   const s = state.results.summary, p = s.bands.primary;
   $("#frame-label").textContent = `Push ${fmt(f.push_mm, 1, "mm")} · photo ${k + 1}/${s.frames}`;
@@ -791,12 +816,102 @@ async function showFrame(k) {
   ].join("");
   const labels = [...new Set(f.bands.map((b) => b.label))];
   $("#legend").innerHTML = (labels.length ? labels : ["primary"]).map((l) => `<div><i style="background:${css(BAND_COLOURS[l])}"></i>${BAND_NAMES[l]}</div>`).join("")
-    + (showStrain ? `<div>Strain overlay: red = high shear strain (up to ${fmt(f.gamma_max, 2)})</div>` : "");
+    + (showStrain ? overlayLegend(f) : "");
   drawBandPlots();
   return true;
 }
 $("#scrub-soil").oninput = (e) => showFrame(+e.target.value);
 $("#show-strain").onchange = () => showFrame(state.frame);
+$("#overlay-quantity").onchange = () => { state.quantity = $("#overlay-quantity").value; showFrame(state.frame); if (state.probe && state.probe.points.length && state.probe.kind !== "extensometer") runProbe(); };
+// Overlay legend: what the colours mean for the quantity shown.
+function overlayLegend(f) {
+  const v = (x) => f.percent ? `${fmt(100 * x, 3)}%` : `${fmt(x, 3)}${f.unit ? " " + f.unit : ""}`;
+  return f.signed ? `<div>${esc(f.quantity_label)}: <span style="color:#eb3c28">red</span> positive, <span style="color:#2864eb">blue</span> negative (full colour at ±${v(f.quantity_scale)})</div>`
+    : `<div>${esc(f.quantity_label)}: red = high (full colour at ${v(f.quantity_scale)})</div>`;
+}
+async function fillQuantities() {
+  if (!state.quantities) state.quantities = await api().quantities();
+  $("#overlay-quantity").innerHTML = state.quantities.map((q) => `<option value="${q.key}">${esc(q.label)}</option>`).join("");
+  $("#overlay-quantity").value = state.quantity || "gamma";
+}
+
+/* ---------------- inspection tools: point, line, extensometer ---------------- */
+const PROBE_POINTS = { point: 1, line: 2, extensometer: 2 };
+$$("[data-probe]").forEach((b) => b.onclick = () => {
+  const kind = b.dataset.probe;
+  const on = !(state.probe && state.probe.kind === kind && !state.probe.done);
+  $$("[data-probe]").forEach((x) => x.classList.toggle("on", on && x === b));
+  state.probe = on ? { kind, points: [], frame: state.frame } : null;
+  $(".stage-img").classList.toggle("probing", on);
+  $("#probe-hint").textContent = on ? (kind === "point" ? "Click a spot on the photo." : "Click the two end points on the photo.") : "";
+  $("#probe-clear").classList.toggle("hidden", !on);
+  drawProbeMarks();
+});
+$("#probe-clear").onclick = () => { state.probe = null; $$("[data-probe]").forEach((x) => x.classList.remove("on")); $(".stage-img").classList.remove("probing");
+  $("#probe-hint").textContent = ""; $("#probe-clear").classList.add("hidden"); $("#probe-panel").classList.add("hidden"); drawProbeMarks(); };
+$(".stage-img").addEventListener("click", (e) => {
+  const p = state.probe, f = state.lastFrame;
+  if (!p || p.done || !f) return;
+  const r = $("#frame-img").getBoundingClientRect();
+  p.points.push([(e.clientX - r.left) * f.width / r.width, (e.clientY - r.top) * f.height / r.height]);
+  p.frame = state.frame;
+  drawProbeMarks();
+  if (p.points.length === PROBE_POINTS[p.kind]) {
+    p.done = true; $(".stage-img").classList.remove("probing");
+    $("#probe-hint").textContent = "Measured: see the chart below. Click a tool to measure again.";
+    runProbe();
+  }
+});
+function drawProbeMarks() {
+  const svg = $("#frame-svg"); svg.querySelectorAll(".probe-mark").forEach((n) => n.remove());
+  const p = state.probe; if (!p || !p.points.length || p.frame !== state.frame) return;
+  const mark = p.points.map(([x, y]) => `<circle class="probe-mark" cx="${x}" cy="${y}" r="6" fill="none" stroke="#ffd43b" stroke-width="3"/>`).join("")
+    + (p.points.length === 2 ? `<line class="probe-mark" x1="${p.points[0][0]}" y1="${p.points[0][1]}" x2="${p.points[1][0]}" y2="${p.points[1][1]}" stroke="#ffd43b" stroke-width="2.5" stroke-dasharray="${p.kind === "line" ? "0" : "6 4"}"/>` : "");
+  svg.insertAdjacentHTML("beforeend", mark);
+}
+async function runProbe() {
+  const p = state.probe, f = state.lastFrame, s = state.results.summary;
+  const quantity = p.kind === "extensometer" ? "exx" : (state.quantity || "exx");
+  const r = await api().probe(state.projectPath, p.kind, p.points, p.frame, quantity, f.display_scale);
+  if (!r.ok) return toast(r.error);
+  state.probeResult = r;
+  const axisLabel = s.axis ? s.axis.label : "Wall push (mm)";
+  const pct = (arr, on) => arr.map((v) => (v === null ? null : on ? 100 * v : v));
+  let traces, layout, title;
+  if (r.kind === "point") {
+    title = `Point at (${fmt(r.point_mm[0], 2)}, ${fmt(r.point_mm[1], 2)}) mm: ${r.quantity} through the test`
+      + (r.near_edge ? " — ⚑ near the edge of the object: strain here is less reliable" : "");
+    traces = [{ x: r.axis, y: pct(r.values, r.percent), mode: "lines+markers", marker: { size: 4 }, name: r.quantity }];
+    layout = plotLayout(axisLabel, r.quantity + (r.percent ? " (%)" : r.unit ? ` (${r.unit})` : ""));
+  } else if (r.kind === "line") {
+    title = `Line profile of ${r.quantity}, photo ${r.photo + 1}` + (r.near_edge.some(Boolean) ? " — ⚑ the ends near the object's edge are less reliable" : "");
+    traces = [{ x: r.distance_mm, y: pct(r.values, r.percent), mode: "lines", name: r.quantity }];
+    layout = plotLayout("Distance along the line (mm)", r.quantity + (r.percent ? " (%)" : r.unit ? ` (${r.unit})` : ""));
+  } else {
+    title = `Virtual extensometer, gauge length ${fmt(r.gauge_mm, 2)} mm: strain ${fmt(100 * r.strain[r.strain.length - 1], 4)}% at the end`;
+    traces = [{ x: r.axis, y: pct(r.strain, true), mode: "lines+markers", marker: { size: 4 }, name: "strain" }];
+    layout = plotLayout(axisLabel, "Extensometer strain (%)");
+  }
+  layout.showlegend = false; layout.margin.t = 12;
+  $("#probe-title").textContent = title;
+  $("#probe-panel").classList.remove("hidden");
+  requestAnimationFrame(() => Plotly.react("plot-probe", traces, layout, PLOT_CONFIG));
+}
+$("#probe-save").onclick = async () => {
+  const r = state.probeResult; if (!r) return;
+  const table = r.kind === "line" ? { distance_mm: r.distance_mm, [r.quantity]: r.values }
+    : r.kind === "point" ? { axis: r.axis, [r.quantity]: r.values, ux_mm: r.ux, uz_mm: r.uz }
+    : { axis: r.axis, length_mm: r.length_mm, strain: r.strain };
+  const saved = await api().save_probe(state.projectPath, `${r.kind} ${new Date().toISOString().slice(0, 19).replace(/[T:]/g, "-")}`, table);
+  toast(saved.ok ? `Saved ${saved.path.split("/").pop()} (results/probes)` : saved.error);
+};
+$("#export-format").onchange = async () => {
+  const fmt_ = $("#export-format").value; $("#export-format").value = "";
+  if (!fmt_) return;
+  toast("Exporting every field of every photo…");
+  const r = await api().export_fields(state.projectPath, fmt_);
+  toast(r.ok ? `Exported to ${r.path.replace(/^.*\/results\//, "results/")}` : r.error);
+};
 // Playback shows each photo for at least PLAY_STEP_MS, waiting for it to
 // arrive, and pre-loads the next one meanwhile. Dragging the slider while
 // playing continues from the new position.
