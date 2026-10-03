@@ -27,11 +27,16 @@ def integer_search(
     search_radius: int,
     prior_u: np.ndarray | None = None,
     prior_v: np.ndarray | None = None,
+    subset_mask=None,
+    point_ids: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Return (u, v, peak_zncc) integer displacements per subset.
 
     Subsets whose template or search window leaves the image get NaN.
-    Centres are rounded to the nearest pixel for the template.
+    Centres are rounded to the nearest pixel for the template. With
+    subset_mask (dic.mask.SubsetMask) and point_ids, a subset that reaches
+    past the object's outline is matched on its object pixels only (a
+    template that is half background would lock onto the still background).
     """
     n = centres_x.size
     prior_u = np.zeros(n) if prior_u is None else np.nan_to_num(prior_u)
@@ -42,6 +47,13 @@ def integer_search(
     u = np.full(n, np.nan)
     v = np.full(n, np.nan)
     peak = np.full(n, np.nan)
+    template_masks: dict[int, np.ndarray] = {}
+    if subset_mask is not None:
+        partial = np.flatnonzero(~subset_mask.full(point_ids))
+        if partial.size:
+            side = 2 * radius + 1
+            weights = subset_mask.weights(point_ids[partial]).astype(np.float32).reshape(-1, side, side)
+            template_masks = dict(zip(partial.tolist(), weights))
 
     def search(indices: range) -> None:
         for i in indices:
@@ -59,7 +71,12 @@ def integer_search(
         x0c, y0c, x1c, y1c = max(x0, 0), max(y0, 0), min(x1, width), min(y1, height)
         if x1c - x0c < template.shape[1] or y1c - y0c < template.shape[0]:
             return
-        response = cv2.matchTemplate(cur32[y0c:y1c, x0c:x1c], template, cv2.TM_CCOEFF_NORMED)
+        template_mask = template_masks.get(i)
+        if template_mask is None:
+            response = cv2.matchTemplate(cur32[y0c:y1c, x0c:x1c], template, cv2.TM_CCOEFF_NORMED)
+        else:
+            response = np.nan_to_num(cv2.matchTemplate(cur32[y0c:y1c, x0c:x1c], template, cv2.TM_CCOEFF_NORMED,
+                                                       mask=template_mask), nan=-1.0)
         _, best, _, loc = cv2.minMaxLoc(response)
         u[i] = x0c + loc[0] + radius - tx
         v[i] = y0c + loc[1] + radius - ty

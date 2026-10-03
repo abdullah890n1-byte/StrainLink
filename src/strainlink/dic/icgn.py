@@ -94,8 +94,13 @@ def _params_from_matrices(m: np.ndarray) -> np.ndarray:
     )
 
 
-def _zero_normalise(values: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    centred = values - values.mean(axis=1, keepdims=True)
+def _zero_normalise(values: np.ndarray, weights: np.ndarray | None = None) -> tuple[np.ndarray, np.ndarray]:
+    """Zero-mean values and their spread; with weights, over the weighted pixels only (others become 0)."""
+    if weights is None:
+        centred = values - values.mean(axis=1, keepdims=True)
+    else:
+        mean = (values * weights).sum(axis=1, keepdims=True) / np.maximum(weights.sum(axis=1, keepdims=True), 1.0)
+        centred = (values - mean) * weights
     spread = np.sqrt((centred**2).sum(axis=1))
     return centred, spread
 
@@ -108,9 +113,15 @@ def refine(
     initial_params: np.ndarray,
     radius: int,
     settings: ICGNSettings | None = None,
+    subset_mask=None,
+    point_ids: np.ndarray | None = None,
 ) -> ICGNResult:
     """Refine displacement parameters for subsets centred at (centres_x, centres_y)
-    in the reference image. Centres may be non-integer (incremental tracking)."""
+    in the reference image. Centres may be non-integer (incremental tracking).
+
+    subset_mask (a dic.mask.SubsetMask) with point_ids (each subset's point index)
+    makes the subsets edge-aware: only pixels on the object take part.
+    """
     settings = settings or ICGNSettings()
     n = centres_x.size
     params = np.array(initial_params, dtype=np.float64, copy=True)
@@ -120,7 +131,8 @@ def refine(
     slices = [slice(s, min(s + CHUNK_SIZE, n)) for s in range(0, n, CHUNK_SIZE)]
 
     def solve(sl: slice):
-        return sl, _refine_chunk(reference, current, centres_x[sl], centres_y[sl], params[sl], radius, settings)
+        weights = None if subset_mask is None else subset_mask.chunk_weights(point_ids[sl])
+        return sl, _refine_chunk(reference, current, centres_x[sl], centres_y[sl], params[sl], radius, settings, weights)
 
     with ThreadPoolExecutor(max_workers=min(WORKERS, max(len(slices), 1))) as pool:
         for sl, (p, z, it, ok) in pool.map(solve, slices):
@@ -128,15 +140,18 @@ def refine(
     return ICGNResult(params=params, zncc=zncc, iterations=iterations, converged=converged)
 
 
-def _refine_chunk(reference, current, cx, cy, params, radius, settings):
+def _refine_chunk(reference, current, cx, cy, params, radius, settings, weights=None):
     dx, dy = subset_offsets(radius)
     ref_x = cx[:, None] + dx[None, :]
     ref_y = cy[:, None] + dy[None, :]
 
     f = reference.sample(ref_x, ref_y)
     fx, fy = reference.sample_gradients(ref_x, ref_y)
-    f_centred, f_spread = _zero_normalise(f)
+    f_centred, f_spread = _zero_normalise(f, weights)
     textured = f_spread > MIN_INTENSITY_SPREAD
+    if weights is not None:
+        # Pixels off the object contribute nothing to the Hessian or the residual.
+        fx, fy = fx * weights, fy * weights
 
     # Steepest-descent images: grad(f) * dW/dp, shape (N, S, 6).
     jac = np.stack([fx, fx * dx, fx * dy, fy, fy * dx, fy * dy], axis=2)
@@ -160,7 +175,7 @@ def _refine_chunk(reference, current, cx, cy, params, radius, settings):
         wx = cx[idx, None] + m[:, 0, 0, None] * dx + m[:, 0, 1, None] * dy + m[:, 0, 2, None]
         wy = cy[idx, None] + m[:, 1, 0, None] * dx + m[:, 1, 1, None] * dy + m[:, 1, 2, None]
         g = current.sample(wx, wy)
-        g_centred, g_spread = _zero_normalise(g)
+        g_centred, g_spread = _zero_normalise(g, None if weights is None else weights[idx])
         g_spread = np.where(g_spread > MIN_INTENSITY_SPREAD, g_spread, np.nan)
 
         residual = f_centred[idx] - (f_spread[idx] / g_spread)[:, None] * g_centred
@@ -182,14 +197,14 @@ def _refine_chunk(reference, current, cx, cy, params, radius, settings):
         active[idx[done | bad]] = False
 
     params_out = _params_from_matrices(warps)
-    zncc = _final_zncc(current, cx, cy, warps, dx, dy, f_centred, f_spread)
+    zncc = _final_zncc(current, cx, cy, warps, dx, dy, f_centred, f_spread, weights)
     zncc[~solvable] = np.nan
     return params_out, zncc, iterations, converged
 
 
-def _final_zncc(current, cx, cy, warps, dx, dy, f_centred, f_spread):
+def _final_zncc(current, cx, cy, warps, dx, dy, f_centred, f_spread, weights=None):
     wx = cx[:, None] + warps[:, 0, 0, None] * dx + warps[:, 0, 1, None] * dy + warps[:, 0, 2, None]
     wy = cy[:, None] + warps[:, 1, 0, None] * dx + warps[:, 1, 1, None] * dy + warps[:, 1, 2, None]
-    g_centred, g_spread = _zero_normalise(current.sample(wx, wy))
+    g_centred, g_spread = _zero_normalise(current.sample(wx, wy), weights)
     with np.errstate(invalid="ignore", divide="ignore"):
         return (f_centred * g_centred).sum(axis=1) / (f_spread * g_spread)
