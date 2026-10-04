@@ -13,9 +13,12 @@ from concurrent.futures import ThreadPoolExecutor
 
 import cv2
 import numpy as np
+from scipy.spatial import cKDTree
 
 # OpenCV's matchTemplate releases the GIL, so subsets are searched in parallel threads.
 WORKERS = max(1, (os.cpu_count() or 1))
+# An edge subset borrows the integer estimate of a fully-on-object point within this many subset radii.
+BORROW_RADII = 3.0
 
 
 def integer_search(
@@ -47,19 +50,34 @@ def integer_search(
     u = np.full(n, np.nan)
     v = np.full(n, np.nan)
     peak = np.full(n, np.nan)
+    # Edge subsets (partly off the object): a masked search is exact but slow (several FFT
+    # correlations each), so it is kept for the ones with no fully-on-object point nearby; the
+    # others borrow their neighbour's result afterwards (displacement is continuous, and IC-GN
+    # refines from there).
     template_masks: dict[int, np.ndarray] = {}
+    partial = np.zeros(n, dtype=bool)
+    borrow_from = np.full(n, -1)
     if subset_mask is not None:
-        partial = np.flatnonzero(~subset_mask.full(point_ids))
-        if partial.size:
+        partial = ~subset_mask.full(point_ids)
+        full_idx = np.flatnonzero(~partial)
+        if partial.any() and full_idx.size:
+            tree = cKDTree(np.column_stack([centres_x[full_idx], centres_y[full_idx]]))
+            distance, nearest = tree.query(np.column_stack([centres_x[partial], centres_y[partial]]))
+            close = distance <= BORROW_RADII * radius
+            borrow_from[np.flatnonzero(partial)[close]] = full_idx[nearest[close]]
+        alone = np.flatnonzero(partial & (borrow_from < 0))
+        if alone.size:
             side = 2 * radius + 1
-            weights = subset_mask.weights(point_ids[partial]).astype(np.float32).reshape(-1, side, side)
-            template_masks = dict(zip(partial.tolist(), weights))
+            weights = subset_mask.weights(point_ids[alone]).astype(np.float32).reshape(-1, side, side)
+            template_masks = dict(zip(alone.tolist(), weights))
 
     def search(indices: range) -> None:
         for i in indices:
             _search_one(i)
 
     def _search_one(i: int) -> None:
+        if borrow_from[i] >= 0:
+            return
         tx, ty = int(round(centres_x[i])), int(round(centres_y[i]))
         if not (radius <= tx < reference.shape[1] - radius and radius <= ty < reference.shape[0] - radius):
             return
@@ -85,4 +103,15 @@ def integer_search(
     blocks = [range(s, min(s + max(n // WORKERS, 1), n)) for s in range(0, n, max(n // WORKERS, 1))]
     with ThreadPoolExecutor(max_workers=WORKERS) as pool:
         list(pool.map(search, blocks))
+    borrowers = np.flatnonzero(borrow_from >= 0)
+    if borrowers.size:
+        source = borrow_from[borrowers]
+        # The neighbour's movement relative to its own prior, added to this point's prior.
+        u[borrowers] = np.round(prior_u[borrowers]) + (u[source] - np.round(prior_u[source]))
+        v[borrowers] = np.round(prior_v[borrowers]) + (v[source] - np.round(prior_v[source]))
+        peak[borrowers] = peak[source]
+        # The template must still fit inside the photo for IC-GN's start to be meaningful.
+        tx, ty = np.round(centres_x[borrowers]), np.round(centres_y[borrowers])
+        outside = ~((tx >= radius) & (tx < reference.shape[1] - radius) & (ty >= radius) & (ty < reference.shape[0] - radius))
+        u[borrowers[outside]] = v[borrowers[outside]] = peak[borrowers[outside]] = np.nan
     return u, v, peak
