@@ -24,7 +24,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from scipy import ndimage, optimize
+from scipy import ndimage
 
 from .. import __version__, correlate
 from ..bands import DetectionSettings, detect_bands
@@ -75,6 +75,12 @@ MIN_INTACT_POINTS = 25
 # Offsets whose fit is statistically as good as the best one: residual within this 95% bound for
 # one fitted parameter (chi-squared, 1 degree of freedom) of the best mean squared residual.
 OFFSET_CHI2_95 = 3.84
+# Clock matching from the load: the load must follow the intact material's strain at least this
+# well (R² at the best offset) for the pair to be used.
+MIN_SYNC_R2 = 0.9
+# A pairing needs this many photos; a zone counts as formed once it is seen in this many photos in a row.
+MIN_SYNC_PHOTOS = 5
+PERSISTENT_ZONE_PHOTOS = 3
 
 
 def image_frame(mm_per_px: float, shape: tuple[int, int]) -> WallFrame:
@@ -181,7 +187,8 @@ def run(project_path: str | Path, progress: Progress | None = None) -> dict:
         _all_columns(table, confirmed="channels" in project["sensors"])
     report(STAGES[4], 0.0, "Matching photos to the logger clock")
     ext = _extensometers(fields["ux"], fields["uz"], x_mm, z_mm)
-    timing = _timing(project, sequence.times_s, table, ext)
+    object_series = _object_series(fields, ext, per_frame, x_mm, z_mm)
+    timing = _timing(project, sequence.times_s, table, ext, object_series, _first_zone_photo(per_frame))
     timing["sync"]["photo_time_source"] = sequence.time_source
     axis_values = timing["axis"]
     tracks = _secondary_tracks(per_frame, axis_values)
@@ -206,7 +213,7 @@ def run(project_path: str | Path, progress: Progress | None = None) -> dict:
     report(STAGES[5], 0.0, "Finding and testing relationships")
     frames = pd.DataFrame({"photo": np.arange(1, n + 1), "time_s": sequence.times_s, timing["axis_label"]: axis_values})
     obj_cols = []
-    for label, values in _object_series(fields, ext, per_frame, x_mm, z_mm).items():
+    for label, values in object_series.items():
         frames[label] = values
         obj_cols.append(label)
     for name, values in series.items():
@@ -226,6 +233,13 @@ def run(project_path: str | Path, progress: Progress | None = None) -> dict:
     o_events = zone_events(tracks, modes, crossing, max(frame_sigma, timing["axis_sigma"]))
     axis_words = (timing["axis_name"], timing["axis_unit"])
     findings = correlate.coincidences(s_events, o_events, axis_words)
+    # The clock may have been matched with one of the channels: say so on its timing findings.
+    matched = timing["sync"].get("matched_channel")
+    if matched and matched != timing.get("axis_channel"):
+        for finding in findings:
+            if finding.title.startswith(matched):
+                finding.caveats.append(f"The photos were matched to the logger clock by assuming {matched} follows the "
+                                       f"strain of the intact material, so this timing is not fully independent of it.")
     # Findings about the object itself (these need no logger).
     zone_list = [{"name": t.name, "mode": modes.get(t.name, ""), "onset": t.onset_mm} for t in tracks]
     findings += formation_order(o_events, axis_words)
@@ -317,8 +331,29 @@ def _extensometers(ux: np.ndarray, uz: np.ndarray, x: np.ndarray, z: np.ndarray)
     return out
 
 
-def _timing(project: dict, frame_times: np.ndarray, table, ext: dict) -> dict:
-    """Common axis for events and charts, and each photo's time on the logger clock."""
+def _first_zone_photo(per_frame) -> int | None:
+    """First photo from which a zone is seen in several photos in a row (None: no lasting zone)."""
+    present = [len(fb.bands) > 0 for fb in per_frame]
+    for k in range(len(present) - PERSISTENT_ZONE_PHOTOS + 1):
+        if all(present[k:k + PERSISTENT_ZONE_PHOTOS]):
+            return k
+    return None
+
+
+def _timing(project: dict, frame_times: np.ndarray, table, ext: dict, object_series: dict,
+            first_zone: int | None) -> dict:
+    """Common axis for events and charts, and each photo's time on the logger clock.
+
+    The clock offset is fitted from pairs of signals that physics ties together, and the pair
+    that fixes it best is used:
+
+    - the object's end-to-end stretch and the logger's displacement, over the photos before a
+      zone forms (afterwards the zone takes part of the movement and they are no longer
+      proportional, which biased the clock);
+    - the strain of the intact material and the logger's load (a specimen loaded in series
+      carries the load through its intact material): a load drop fixes the clock sharply even
+      when the loading rate never changes.
+    """
     base = {"axis": frame_times - frame_times[0], "axis_name": "time", "axis_unit": "s", "axis_label": "time (s)",
             "axis_sigma": 0.0, "event_sigma": 0.0, "logger_time_at_frames": frame_times - frame_times[0],
             "offset_s": 0.0, "sync": {"source": "photos only"}}
@@ -326,19 +361,41 @@ def _timing(project: dict, frame_times: np.ndarray, table, ext: dict) -> dict:
         return base
     cfg = project.get("sync", {})
     disp = next(iter(table.by_role("displacement")), None)
-    mode = cfg.get("mode", "auto" if disp is not None else "offset")
+    force = next(iter(table.by_role("force")), None)
+    mode = cfg.get("mode", "auto" if (disp is not None or force is not None) else "offset")
     logger_t = table.time_s
     step = float(np.nanmedian(np.diff(logger_t))) if len(logger_t) > 1 else 0.0
-    if mode == "offset" or disp is None:
+    sync_extra: dict = {}
+    if mode == "offset" or (disp is None and force is None):
         offset, sigma, source = float(cfg.get("offset_s", 0.0)), 0.0, "user" if "offset_s" in cfg else "assumed"
     else:
-        dic = max(ext.values(), key=lambda v: np.nanmax(np.abs(v)) if np.isfinite(v).any() else 0.0)
-        offset, sigma, fit_range = _fit_offset(frame_times - frame_times[0], dic, logger_t, table.values(disp))
-        source = "dic"
+        photo_t = frame_times - frame_times[0]
+        candidates = []
+        if disp is not None:
+            name, dic = max(ext.items(), key=lambda kv: np.nanmax(np.abs(kv[1])) if np.isfinite(kv[1]).any() else 0.0)
+            if first_zone is not None and first_zone >= MIN_SYNC_PHOTOS:
+                dic = np.where(np.arange(len(dic)) < first_zone, dic, np.nan)
+            candidates.append({"object": name, "channel": disp.name, "eligible": True,
+                               **_fit_offset(photo_t, dic, logger_t, table.values(disp))})
+        if force is not None:
+            name = max(("strain εxx", "strain εzz"),
+                       key=lambda k: np.nanmax(object_series[k]) - np.nanmin(object_series[k]) if np.isfinite(object_series[k]).any() else 0.0)
+            fit = _fit_offset(photo_t, object_series[name], logger_t, table.values(force))
+            candidates.append({"object": name, "channel": force.name, "eligible": bool(fit["r2"] >= MIN_SYNC_R2), **fit})
+        usable = [c for c in candidates if c["eligible"] and np.isfinite(c["sigma"])]
+        chosen = min(usable, key=lambda c: c["sigma"]) if usable else candidates[0]
+        offset, sigma, source = chosen["offset"], chosen["sigma"], "dic"
+        sync_extra = {"offset_range_s": chosen["range"], "open_ended": chosen["open_ended"],
+                      "matched_object": chosen["object"], "matched_channel": chosen["channel"],
+                      "candidates": [{k: c[k] for k in ("object", "channel", "offset", "sigma", "range", "open_ended", "r2", "eligible")}
+                                     for c in candidates]}
+        frame_gap = float(np.median(np.diff(photo_t))) if len(photo_t) > 1 else 0.0
+        sharp = [c for c in usable if c["sigma"] <= 0.5 * frame_gap]
+        if len(sharp) == 2 and abs(sharp[0]["offset"] - sharp[1]["offset"]) > 2.0 * np.hypot(sharp[0]["sigma"], sharp[1]["sigma"]):
+            sync_extra["conflict"] = (f"Two ways of matching the clock disagree: {sharp[0]['channel']} gives "
+                                      f"{sharp[0]['offset']:.2f} s, {sharp[1]['channel']} gives {sharp[1]['offset']:.2f} s.")
     at_frames = frame_times - frame_times[0] + offset
-    sync = {"source": source, "clock_offset_s": offset, "offset_sigma_s": sigma, "logger_step_s": step}
-    if source == "dic":
-        sync.update(offset_range_s=list(fit_range[:2]), open_ended=fit_range[2])
+    sync = {"source": source, "clock_offset_s": offset, "offset_sigma_s": sigma, "logger_step_s": step, **sync_extra}
     if disp is not None:
         axis = np.interp(at_frames, logger_t, table.values(disp), left=np.nan, right=np.nan)
         slope = np.nanmedian(np.abs(np.gradient(table.values(disp), logger_t))) if len(logger_t) > 2 else 0.0
@@ -351,35 +408,38 @@ def _timing(project: dict, frame_times: np.ndarray, table, ext: dict) -> dict:
             "logger_time_at_frames": at_frames, "offset_s": offset, "sync": sync}
 
 
-def _fit_offset(frame_t: np.ndarray, dic: np.ndarray, logger_t: np.ndarray,
-                disp: np.ndarray) -> tuple[float, float, tuple[float, float, bool]]:
-    """Logger time of the first photo, from DIC stretch = a * (logger displacement - its value at the first photo).
+def _fit_offset(frame_t: np.ndarray, dic: np.ndarray, logger_t: np.ndarray, channel: np.ndarray) -> dict:
+    """Logger time of the first photo, from a DIC signal = a * (logger channel - its value at the first photo).
 
-    DIC measures movement relative to the first photo, so the logger's
-    displacement is taken relative to its value at the first photo too
-    (no free intercept). Scale-free (a is fitted), so it works whatever the
-    specimen's compliance. Timing information comes only from changes in
-    the loading rate (start, stops, unloading): during constant-rate loading
-    any clock shift fits equally well. The uncertainty is therefore the
-    half-width of the range of offsets that fit statistically as well as the
-    best one (95%), combined with the first/second-half disagreement, and
-    the estimate is the centre of that range.
+    DIC measures change since the first photo, so the logger's channel is
+    taken relative to its value at the first photo too (no free
+    intercept). Scale-free (a is fitted), so it works whatever the
+    specimen's stiffness. Timing information comes only from changes in the
+    signal's rate (start, stops, drops): on a steady ramp any clock shift
+    fits equally well.
 
-    Returns the offset, its uncertainty and that range (lowest, highest,
-    open-ended): open-ended when the range runs into the end of the search,
-    i.e. the photos cannot fix the clock on that side at all.
+    The estimate is the centre of the range of offsets that fit
+    statistically as well as the best one (95%): inside that range the
+    best fit's position is noise. The uncertainty is the half-width of that
+    range, or the disagreement between the two halves of the test where it
+    exceeds what each half can determine by itself (a half with no timing
+    information says nothing either way).
+
+    Returns offset, sigma, range [lowest, highest], open_ended (the range
+    runs into the end of the search: the photos cannot fix the clock on
+    that side) and r2 (how well the two signals match at that offset).
     """
     ok = np.isfinite(dic)
-    if ok.sum() < 5 or np.ptp(dic[ok]) == 0:
-        return 0.0, float("nan"), (float("nan"), float("nan"), True)
+    if ok.sum() < MIN_SYNC_PHOTOS or np.ptp(dic[ok]) == 0:
+        return {"offset": 0.0, "sigma": float("nan"), "range": [float("nan"), float("nan")], "open_ended": True, "r2": 0.0}
     duration = float(logger_t[-1] - logger_t[0])
 
     def cost(offset: float, sel: np.ndarray = ok) -> float:
-        d = np.interp(frame_t[sel] + offset, logger_t, disp, left=np.nan, right=np.nan)
-        d0 = np.interp(frame_t[0] + offset, logger_t, disp, left=np.nan, right=np.nan)
+        d = np.interp(frame_t[sel] + offset, logger_t, channel, left=np.nan, right=np.nan)
+        d0 = np.interp(frame_t[0] + offset, logger_t, channel, left=np.nan, right=np.nan)
         rel = d - d0
         good = np.isfinite(rel)
-        if good.sum() < max(5, 0.8 * sel.sum()) or not np.any(rel[good]):
+        if good.sum() < max(MIN_SYNC_PHOTOS, 0.8 * sel.sum()) or not np.any(rel[good]):
             return np.inf
         y = dic[sel][good]
         a = float(rel[good] @ y / (rel[good] @ rel[good]))
@@ -388,35 +448,44 @@ def _fit_offset(frame_t: np.ndarray, dic: np.ndarray, logger_t: np.ndarray,
     grid = np.linspace(logger_t[0] - frame_t[0], logger_t[-1] - frame_t[-1], OFFSET_SEARCH_STEPS)
     if grid[-1] <= grid[0]:
         grid = np.linspace(-duration, duration, OFFSET_SEARCH_STEPS)
+    grid_step = float(grid[1] - grid[0]) if len(grid) > 1 else 1.0
 
-    def best(sel: np.ndarray) -> tuple[float, np.ndarray]:
+    def fit(sel: np.ndarray) -> tuple[float, float, float, bool] | None:
+        """Centre, lowest and highest of the equally good offsets, and whether that range is open-ended."""
         costs = np.array([cost(o, sel) for o in grid])
-        o0 = grid[int(np.argmin(costs))]
-        width = (grid[1] - grid[0]) if len(grid) > 1 else 1.0
-        refined = optimize.minimize_scalar(lambda o: cost(o, sel), bounds=(o0 - width, o0 + width), method="bounded").x
-        return float(refined), costs
+        finite = np.isfinite(costs)
+        if not finite.any():
+            return None
+        n = int(sel.sum())
+        # Equally good (95%): the usual bound for one fitted parameter, plus the fit's own sampling
+        # noise. Every offset reads different (noisy) logger samples, so the mean squared residual
+        # itself scatters by about sqrt(2/n) of its value from one offset to the next; without that
+        # allowance a noise dip on a flat curve looked like a sharp minimum.
+        allowance = OFFSET_CHI2_95 / max(n - 2, 1) + 2.0 * np.sqrt(2.0 / n)
+        equal_mask = finite & (costs <= float(np.min(costs[finite])) * (1.0 + allowance) + 1e-15)
+        equal, usable = grid[equal_mask], np.flatnonzero(finite)
+        open_ended = bool(equal_mask[usable[0]] or equal_mask[usable[-1]])
+        return 0.5 * float(equal.min() + equal.max()), float(equal.min()), float(equal.max()), open_ended
 
-    offset, costs = best(ok)
-    # Offsets whose fit is statistically as good as the best (95%, see OFFSET_CHI2_95).
-    finite = np.isfinite(costs)
-    minimum = float(np.min(costs[finite])) if finite.any() else np.inf
-    equal_mask = finite & (costs <= minimum * (1.0 + OFFSET_CHI2_95 / max(ok.sum() - 2, 1)) + 1e-15)
-    equal = grid[equal_mask]
-    flatness = 0.5 * float(equal.max() - equal.min()) if len(equal) else 0.0
-    usable = np.flatnonzero(finite)
-    open_ended = bool(len(equal) and usable.size and (equal_mask[usable[0]] or equal_mask[usable[-1]]))
-    fit_range = (float(equal.min()), float(equal.max()), open_ended) if len(equal) else (offset, offset, False)
-    if len(equal):
-        # Offsets in that range fit equally well, so where the best fit falls inside it is noise:
-        # the centre of the range is the estimate with the smallest worst-case error.
-        offset = 0.5 * (fit_range[0] + fit_range[1])
+    whole = fit(ok)
+    if whole is None:
+        return {"offset": 0.0, "sigma": float("nan"), "range": [float("nan"), float("nan")], "open_ended": True, "r2": 0.0}
+    offset, low, high, open_ended = whole
     idx = np.flatnonzero(ok)
     first, second = np.zeros_like(ok), np.zeros_like(ok)
     first[idx[: len(idx) // 2]], second[idx[len(idx) // 2:]] = True, True
-    halves = [best(h)[0] for h in (first, second) if h.sum() >= 5]
-    spread = 0.5 * abs(halves[0] - halves[1]) if len(halves) == 2 else 0.0
+    halves = [h for h in (fit(first) if first.sum() >= MIN_SYNC_PHOTOS else None,
+                          fit(second) if second.sum() >= MIN_SYNC_PHOTOS else None) if h is not None]
+    disagreement = 0.0
+    if len(halves) == 2:
+        own = max(0.5 * (halves[0][2] - halves[0][1]), 0.5 * (halves[1][2] - halves[1][1]))
+        disagreement = max(0.5 * abs(halves[0][0] - halves[1][0]) - own, 0.0)
     frame_step = float(np.median(np.diff(frame_t))) if len(frame_t) > 1 else 0.0
-    return offset, float(max(flatness, spread, 0.1 * frame_step)), fit_range
+    variance = float(np.var(dic[ok]))
+    final = cost(offset)
+    r2 = 1.0 - final / variance if variance > 0 and np.isfinite(final) else 0.0
+    sigma = max(0.5 * (high - low), disagreement, 0.5 * grid_step, 0.1 * frame_step)
+    return {"offset": float(offset), "sigma": float(sigma), "range": [low, high], "open_ended": open_ended, "r2": float(r2)}
 
 
 def _on_axis(timing: dict, table, values: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -553,6 +622,9 @@ def _flags(per_frame, timing: dict, time_source: str, photo_paths=()) -> list[st
     if sync.get("source") == "dic" and np.isfinite(sync.get("offset_sigma_s", np.nan)):
         step = sync.get("logger_step_s", 0.0)
         frame_gap = float(np.nanmedian(np.diff(timing["logger_time_at_frames"]))) if len(timing["logger_time_at_frames"]) > 1 else 0.0
+        if sync.get("conflict"):
+            flags.append(sync["conflict"] + " Check which logger column is the load and which the displacement, "
+                         "or enter the clock offset.")
         if sync.get("open_ended"):
             lo, hi = sync["offset_range_s"]
             flags.append(f"Photos could not be matched to the logger clock from the images: the loading rate does not "
