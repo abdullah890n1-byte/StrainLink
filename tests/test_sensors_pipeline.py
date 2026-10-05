@@ -96,3 +96,24 @@ def test_cell_softening_hypothesis_rejected_when_unrelated():
     report = correlate.analyse(onsets, [], tips, levels, pd.DataFrame({"push_mm": []}), [], [])
     finding = next(f for f in report.findings if f.key == "cells-vs-tip")
     assert finding.strength in ("not supported", "weak")
+
+
+def test_wall_push_is_read_at_the_wall_face_not_in_the_lagging_soil():
+    """Soil a few cm from the wall lags it, more and more through the test; at the face it does not."""
+    from strainlink import sync
+    height = 400.0
+    xs, zs = np.meshgrid(np.arange(10.0, 200.0, 5.0), np.arange(20.0, 380.0, 5.0))
+    x, z = xs.ravel(), zs.ravel()
+    pushes = np.linspace(0.0, 60.0, 31)
+    # Lag: none at the wall, growing with distance (curved) and out of proportion to the push.
+    lag = lambda push: (push / 60.0) ** 2 * (0.012 * x + 0.0004 * x**2)   # noqa: E731
+    rng = np.random.default_rng(0)
+    ux = np.array([p - lag(p) + rng.normal(0, 0.003, x.size) for p in pushes])
+    found = sync.wall_push_from_dic(ux, x, z, height)
+    assert np.max(np.abs(found - pushes)) < 0.01
+    strip = np.array([np.median(u[(x <= 25.0) & (z >= 0.2 * height) & (z <= 0.8 * height)]) for u in ux])
+    assert np.max(np.abs(strip - pushes)) > 0.2           # what the old measure would have read
+
+    # With too few columns measured, it falls back to the strip (and does not fail).
+    few = x <= 25.0
+    assert np.all(np.isfinite(sync.wall_push_from_dic(ux[:, few], x[few], z[few], height)))

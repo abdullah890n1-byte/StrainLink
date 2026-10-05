@@ -3,11 +3,11 @@
 The camera and the data logger keep separate clocks, and neither records
 the other. StrainLink links them through the one quantity both see: the
 wall push. The logger records it directly (actuator displacement); DIC
-sees it as the movement of the soil touching the wall. That soil moves
-slightly less than the wall (it also slides upward along the slip
-direction: ~0.3% less in the synthetic tests), so the offset is fitted
-together with a scale factor: DIC push = scale * actuator push(photo time +
-offset). Assuming scale = 1 biased the offset by 6 s in testing.
+sees it as the movement of the soil touching the wall, read at the wall
+face from the soil movement next to it (see wall_push_from_dic). A scale
+factor is still fitted with the offset: DIC push = scale * actuator
+push(photo time + offset). Assuming scale = 1 biased the offset by 6 s
+in testing.
 
 Other modes: a known offset entered by the user, or photos triggered every
 fixed push increment (as Vic-Snap can do).
@@ -31,6 +31,11 @@ MIN_PUSH_FOR_SYNC_MM = 0.5
 WALL_STRIP_MM = (2.0, 25.0)
 WALL_STRIP_COLUMNS = 2
 WALL_STRIP_HEIGHT_FRACTION = (0.2, 0.8)
+# The wall's own movement is read where the soil touches it: a curve (quadratic) through the soil
+# movement of the first columns of DIC points, evaluated at the wall face (x = 0). At least
+# FACE_FIT_MIN_COLUMNS of them must be measured in a photo; otherwise the strip is used.
+FACE_FIT_COLUMNS = 8
+FACE_FIT_MIN_COLUMNS = 5
 
 
 @dataclass
@@ -50,7 +55,14 @@ class Timeline:
 
 def wall_push_from_dic(ux_mm: np.ndarray, x_mm: np.ndarray, z_mm: np.ndarray, wall_height_mm: float,
                        valid: np.ndarray | None = None) -> np.ndarray:
-    """Per-frame wall push seen by DIC: median horizontal movement of soil touching the wall.
+    """Per-frame wall push seen by DIC: the horizontal movement of the soil where it touches the wall.
+
+    The soil a few centimetres from the wall moves slightly less than the wall (it compresses,
+    and later rides up the slip surface), and that lag grows through the test out of proportion
+    to the push. Matching clocks on the soil in a strip next to the wall therefore placed every
+    photo up to 0.06 mm of push late in loose sand. The lag vanishes at the wall face, so the
+    movement is fitted against the distance from the wall and read at the face. Where too few
+    columns are measured, the median of the strip next to the wall is used.
 
     ux_mm: (frames, N) horizontal displacement of tracked points; x_mm, z_mm: (N,) positions.
     """
@@ -62,7 +74,22 @@ def wall_push_from_dic(ux_mm: np.ndarray, x_mm: np.ndarray, z_mm: np.ndarray, wa
     if not strip.any():
         raise ValueError("no DIC points next to the wall: check the wall-toe position and the region of interest")
     values = np.where(valid, ux_mm, np.nan) if valid is not None else ux_mm
-    return np.nanmedian(values[:, strip], axis=1)
+    with np.errstate(all="ignore"):
+        from_strip = np.nanmedian(values[:, strip], axis=1)
+    rows = ((z_mm >= WALL_STRIP_HEIGHT_FRACTION[0] * wall_height_mm)
+            & (z_mm <= WALL_STRIP_HEIGHT_FRACTION[1] * wall_height_mm) & np.isfinite(x_mm))
+    near = columns[:FACE_FIT_COLUMNS]
+    if len(near) < FACE_FIT_MIN_COLUMNS:
+        return from_strip
+    members = [rows & (np.abs(x_mm - c) < 1e-6) for c in near]
+    push = from_strip.copy()
+    for k in range(values.shape[0]):
+        with np.errstate(all="ignore"):
+            profile = np.array([np.nanmedian(values[k, m]) if m.any() else np.nan for m in members])
+        known = np.isfinite(profile)
+        if known.sum() >= FACE_FIT_MIN_COLUMNS:
+            push[k] = np.polyfit(near[known], profile[known], 2)[2]        # the curve's value at x = 0
+    return push
 
 
 def monotone_push(logger_time_s: np.ndarray, push_mm: np.ndarray) -> np.ndarray:
