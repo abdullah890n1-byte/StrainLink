@@ -6,6 +6,27 @@ const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const api = () => window.pywebview.api;
 const css = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 const fmt = (v, d = 2, unit = "") => (v === null || v === undefined || Number.isNaN(v)) ? "—" : `${Number(v).toFixed(d)}${unit ? " " + unit : ""}`;
+// Accuracy (95%) shown with a result. Strains read best in microstrain (1 µε = 0.0001%).
+const microstrain = (v) => (v === null || v === undefined || Number.isNaN(v)) ? "—" : `${Math.round(1e6 * v)} µε`;
+// "within 1.2% of the value", or that the value is below the noise.
+function withinText(value, u95) {
+  if (value === null || u95 === null || value === undefined || u95 === undefined) return "";
+  if (Math.abs(value) <= u95) return "smaller than the measurement noise";
+  const share = 100 * u95 / Math.abs(value);
+  return `within ${share < 0.1 ? "0.1" : share.toFixed(1)}% of the value`;
+}
+// ± in the unit a quantity is shown in (percent quantities: strain as a fraction).
+function plusMinus(u95, percent, unit) {
+  if (u95 === null || u95 === undefined) return "";
+  return percent ? `± ${fmt(100 * u95, 3)}%` : `± ${fmt(u95, unit === "mm" ? 4 : 3)}${unit ? " " + unit : ""}`;
+}
+function pointAccuracyCard(s) {
+  const a = s.accuracy; if (!a || !a.point) return null;
+  const d = a.point.displacement_mm;
+  return ["Accuracy at a point", `± ${microstrain(a.point.strain)}`,
+    `strain, 95% · displacement ± ${d === null ? "—" : fmt(1000 * d, 1)} µm${a.point.displacement_px ? ` (${fmt(a.point.displacement_px, 3)} px)` : ""}`,
+    (s.flags || []).some((f) => f.includes("accuracy at a point")) ? "The strains are small compared with the accuracy at a point: see Review" : ""];
+}
 const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
 const ROLES = [["time", "Time"], ["force", "Actuator force"], ["displacement", "Wall push (actuator)"], ["lvdt", "LVDT (horizontal)"],
@@ -549,6 +570,7 @@ function renderCards(s) {
     ["δmob (wall friction)", fmt(m.delta_mob_deg, 1, "°"), "at uplift onset"],
     ["Cell thrust vs actuator", m.thrust_mismatch_fraction === null ? "—" : fmt(100 * m.thrust_mismatch_fraction, 1, "%"), "difference at peak"],
   ];
+  const accuracyCard = pointAccuracyCard(s); if (accuracyCard) cards.push(accuracyCard);
   $("#res-cards").innerHTML = cards.map(([k, v, sub, flag]) => `<div class="card">${flag ? flagged(flag) : ""}<div class="k">${k}</div><div class="v">${esc(v)}</div><div class="s">${esc(sub)}</div></div>`).join("");
 }
 function renderFindings(s) {
@@ -580,11 +602,31 @@ function renderMarkerCheck(s) {
     <p class="muted small">Each marker is located from its own dark (bright) spot, independently of DIC. The markers themselves are accurate to about 0.06 px, so agreement at that level means DIC is at least that accurate on this test.</p>
     <table class="acc"><thead><tr><th>Marker</th><th>Size</th><th>DIC − marker (RMS)</th><th></th></tr></thead><tbody>${rows}</tbody></table>`;
 }
+// The accuracy of this analysis, stated with what it is based on and what it cannot include.
+function renderAccuracyStatement(s) {
+  const a = s.accuracy, box = $("#acc-statement");
+  box.classList.toggle("hidden", !a);
+  if (!a) return;
+  const names = { exx: "Strain εxx of the object", ezz: "Strain εzz of the object", exz: "Shear strain εxz of the object" };
+  const whole = isGeneral() ? Object.entries(a.whole_object || {}).map(([key, w]) => `<tr><td>${names[key]}</td><td>${fmt(100 * w.value, 3)}%</td>
+    <td>± ${microstrain(w.u95)} (± ${fmt(100 * w.u95, 4)}%)</td><td>${esc(w.text)}</td></tr>`).join("") : "";
+  const p = a.point;
+  const point = [["Strain at one point (εxx, εzz, εxz)", `± ${microstrain(p.strain)}`, a.peak_strain === null ? "" : (a.peak_relative === null ? "the largest strain in the test is below this" : `${fmt(100 * a.peak_relative, 1)}% of the largest strain in the test (${fmt(100 * a.peak_strain, 3)}%)`)],
+    ["Max shear strain γmax at one point", `± ${microstrain(p.gamma)}`, ""],
+    ["Displacement of one point", `± ${p.displacement_mm === null ? "—" : fmt(1000 * p.displacement_mm, 1) + " µm"}`, p.displacement_px ? `${fmt(p.displacement_px, 3)} px` : ""]]
+    .map(([k, v, note]) => `<tr><td>${k}</td><td></td><td>${v}</td><td class="muted">${esc(note)}</td></tr>`).join("");
+  box.innerHTML = `<h3>Accuracy of this analysis (95%)</h3>
+    <p class="muted small">Every strain and displacement is stated with its accuracy: the true value is expected within the ± shown 95 times in 100. Averages over an area (the object's strain, an extensometer) are more accurate than single points. ${a.compressed_images ? "<b>The images are compressed (JPEG or video), so a larger allowance is included.</b>" : ""}</p>
+    <table class="acc"><thead><tr><th>Result</th><th>Value (end of test)</th><th>Accuracy</th><th></th></tr></thead><tbody>${whole}${point}</tbody></table>
+    <p class="muted small"><b>How it is known:</b> ${esc(a.method)}</p>
+    <p class="muted small"><b>Not included</b> (the images cannot show them): ${a.not_included.map(esc).join("; ")}.${s.markers ? "" : " Markers on the object give an independent check of the accuracy on your own test."}</p>`;
+}
 async function renderAccuracy(path) {
   const s = state.results.summary;
+  renderAccuracyStatement(s);
   renderMarkerCheck(s);
   const r = await api().accuracy(path);
-  $("#tab-accuracy").classList.toggle("hidden", !r.ok && !s.markers);
+  $("#tab-accuracy").classList.toggle("hidden", !r.ok && !s.markers && !s.accuracy);
   ["#acc-banner", "#acc-intro", "#acc-table"].forEach((q) => $(q).classList.toggle("hidden", !r.ok));
   if (!r.ok) return;
   const all = r.passed === r.total;
@@ -662,8 +704,8 @@ function renderGeneralCards(s) {
   const cards = [
     ["Photos analysed", String(s.frames), `${s.area.points} measurement points`],
     ["Object size", `${fmt(s.area.size_mm[0], 1)} × ${fmt(s.area.size_mm[1], 1)} mm`, "measured area"],
-    ["Strain εxx (end)", fmt(100 * (lastValue(pp["strain εxx"] || []) ?? NaN), 3, "%"), "typical, over the object"],
-    ["Strain εzz (end)", fmt(100 * (lastValue(pp["strain εzz"] || []) ?? NaN), 3, "%"), "typical, over the object"],
+    ["Strain εxx (end)", fmt(100 * (lastValue(pp["strain εxx"] || []) ?? NaN), 3, "%"), wholeText(s, "exx", lastValue(pp["strain εxx"] || []))],
+    ["Strain εzz (end)", fmt(100 * (lastValue(pp["strain εzz"] || []) ?? NaN), 3, "%"), wholeText(s, "ezz", lastValue(pp["strain εzz"] || []))],
     ["Peak shear strain", fmt(lastValue(pp["peak shear strain γmax"] || []), 4), "γmax, end of test"],
     ["Localisation zones", String(zones.length), zoneList || "none found"],
     // Only zones seen in consecutive photos (a confirmed onset) get their own card.
@@ -679,8 +721,15 @@ function renderGeneralCards(s) {
     cards.push(["Clock match", `${fmt(s.sync.clock_offset_s, 2)} s`, `± ${fmt(s.sync.offset_sigma_s, 2)} s · ${s.sync.source === "dic" ? "automatic" : s.sync.source}`,
       s.flags.some((f) => f.includes("matched to the logger")) ? "The clock match is uncertain" : ""]);
   }
+  const accuracyCard = pointAccuracyCard(s); if (accuracyCard) cards.push(accuracyCard);
   const flagged = (text) => `<span class="flag" title="${esc(text)}">⚑</span>`;
   $("#res-cards").innerHTML = cards.map(([k, v, sub, flag]) => `<div class="card">${flag ? flagged(flag) : ""}<div class="k">${k}</div><div class="v">${esc(v)}</div><div class="s">${esc(sub)}</div></div>`).join("");
+}
+// The typical strain of the object with its accuracy: "± 41 µε (95%) · within 0.4% of the value".
+function wholeText(s, key, value) {
+  const w = s.accuracy && s.accuracy.whole_object && s.accuracy.whole_object[key];
+  if (!w || w.u95 === null || value === null || value === undefined) return "typical, over the object";
+  return `± ${microstrain(w.u95)} (95%) · ${withinText(value, w.u95)}`;
 }
 function fillPickers(s, pp) {
   const sensors = (s.sensor_columns || []).filter((c) => pp[c]);
@@ -732,6 +781,11 @@ function drawZonePlots() {
   mk("plot-lift", [...series("opening"), ...series("slip")].map((t) => ({ x, y: pp[t.col], name: `${t.name} ${t.col.includes("slip") ? "slip" : "opening"}`, mode: "lines+markers", marker: { size: 4 }, line: { color: MODE_COLOURS[t.mode || ""] } })), "Opening / slip (mm)");
   mk("plot-area", ["strain εxx", "strain εzz"].filter((c) => pp[c]).map((c) => ({ x, y: pp[c].map((v) => (v === null ? null : 100 * v)), name: c, mode: "lines" })), "Strain of the object (%)");
 }
+// " ± 41 µε": the accuracy (95%) of the object's typical strain in photo k.
+function photoAccuracy(s, key, k) {
+  const u = s.accuracy && s.accuracy.per_photo && s.accuracy.per_photo[key] ? s.accuracy.per_photo[key][k] : null;
+  return u === null || u === undefined ? "" : ` <span class="muted small" title="95% accuracy">± ${microstrain(u)}</span>`;
+}
 function frameSideGeneral(f, k, showStrain) {
   const s = state.results.summary, pp = state.results.per_photo;
   $("#frame-label").textContent = `${s.axis.name} ${axisText(s, f.push_mm)} · photo ${k + 1}/${s.frames}`;
@@ -743,8 +797,8 @@ function frameSideGeneral(f, k, showStrain) {
   });
   $("#frame-metrics").innerHTML = [
     metric("Zones", f.bands.length ? f.bands.map((b) => b.name).join(", ") : "none yet"), ...zoneRows,
-    metric("Strain εxx", fmt(100 * (pp["strain εxx"] || [])[k], 3, "%")),
-    metric("Strain εzz", fmt(100 * (pp["strain εzz"] || [])[k], 3, "%")),
+    metric("Strain εxx", fmt(100 * (pp["strain εxx"] || [])[k], 3, "%") + photoAccuracy(s, "exx", k)),
+    metric("Strain εzz", fmt(100 * (pp["strain εzz"] || [])[k], 3, "%") + photoAccuracy(s, "ezz", k)),
     metric("Peak shear strain", fmt((pp["peak shear strain γmax"] || [])[k], 4)),
     ...(s.sensor_columns || []).slice(0, 4).map((c) => metric(c, fmt(pp[c] ? pp[c][k] : null, 3))),
   ].join("");
@@ -826,6 +880,10 @@ $("#overlay-quantity").onchange = () => { state.quantity = $("#overlay-quantity"
 // Overlay legend: what the colours mean for the quantity shown.
 function overlayLegend(f) {
   const v = (x) => f.percent ? `${fmt(100 * x, 3)}%` : `${fmt(x, 3)}${f.unit ? " " + f.unit : ""}`;
+  return overlayColours(f, v) + (f.accuracy_u95 === null || f.accuracy_u95 === undefined ? ""
+    : `<div title="Measured from this photo's own fine-scale scatter; see the Accuracy tab">Accuracy at a point in this photo: ${plusMinus(f.accuracy_u95, f.percent, f.unit)} (95%)${f.percent ? ` = ${microstrain(f.accuracy_u95)}` : ""}</div>`);
+}
+function overlayColours(f, v) {
   return f.signed ? `<div>${esc(f.quantity_label)}: <span style="color:#eb3c28">red</span> positive, <span style="color:#2864eb">blue</span> negative (full colour at ±${v(f.quantity_scale)})</div>`
     : `<div>${esc(f.quantity_label)}: red = high (full colour at ${v(f.quantity_scale)})</div>`;
 }
@@ -869,6 +927,8 @@ function drawProbeMarks() {
     + (p.points.length === 2 ? `<line class="probe-mark" x1="${p.points[0][0]}" y1="${p.points[0][1]}" x2="${p.points[1][0]}" y2="${p.points[1][1]}" stroke="#ffd43b" stroke-width="2.5" stroke-dasharray="${p.kind === "line" ? "0" : "6 4"}"/>` : "");
   svg.insertAdjacentHTML("beforeend", mark);
 }
+// Error bars for a chart: the 95% accuracy of each value.
+const bars = (u95) => ({ type: "data", array: u95.map((v) => v ?? 0), visible: true, thickness: 1, width: 0, color: "rgba(120,120,120,0.7)" });
 async function runProbe() {
   const p = state.probe, f = state.lastFrame, s = state.results.summary;
   const quantity = p.kind === "extensometer" ? "exx" : (state.quantity || "exx");
@@ -881,15 +941,25 @@ async function runProbe() {
   if (r.kind === "point") {
     title = `Point at (${fmt(r.point_mm[0], 2)}, ${fmt(r.point_mm[1], 2)}) mm: ${r.quantity} through the test`
       + (r.near_edge ? " — ⚑ at the object's edge: measured with a partial subset, so noisier than inside" : "");
-    traces = [{ x: r.axis, y: pct(r.values, r.percent), mode: "lines+markers", marker: { size: 4 }, name: r.quantity }];
+    const end = r.values.length - 1;
+    title += ` · at the end ${r.percent ? fmt(100 * r.values[end], 3) + "%" : fmt(r.values[end], 4) + (r.unit ? " " + r.unit : "")} ${plusMinus(r.u95[end], r.percent, r.unit)} (95%, ${withinText(r.values[end], r.u95[end])})`;
+    traces = [{ x: r.axis, y: pct(r.values, r.percent), mode: "lines+markers", marker: { size: 4 }, name: r.quantity, error_y: bars(pct(r.u95, r.percent)) }];
     layout = plotLayout(axisLabel, r.quantity + (r.percent ? " (%)" : r.unit ? ` (${r.unit})` : ""));
   } else if (r.kind === "line") {
     title = `Line profile of ${r.quantity}, photo ${r.photo + 1}` + (r.near_edge.some(Boolean) ? " — ⚑ the ends at the object's edge are measured with partial subsets, so noisier" : "");
-    traces = [{ x: r.distance_mm, y: pct(r.values, r.percent), mode: "lines", name: r.quantity }];
+    const known = r.u95.filter((v) => v !== null).sort((a, b) => a - b);
+    if (known.length) title += ` · accuracy ${plusMinus(known[Math.floor(known.length / 2)], r.percent, r.unit)} (95%, typical along the line)`;
+    const y = pct(r.values, r.percent), u = pct(r.u95, r.percent);
+    const edge = (sign) => y.map((v, i) => (v === null || u[i] === null ? null : v + sign * u[i]));
+    traces = [
+      { x: r.distance_mm, y: edge(-1), mode: "lines", line: { width: 0 }, hoverinfo: "skip", showlegend: false },
+      { x: r.distance_mm, y: edge(1), mode: "lines", line: { width: 0 }, fill: "tonexty", fillcolor: "rgba(80,140,255,0.18)", hoverinfo: "skip", name: "95% accuracy" },
+      { x: r.distance_mm, y, mode: "lines", name: r.quantity }];
     layout = plotLayout("Distance along the line (mm)", r.quantity + (r.percent ? " (%)" : r.unit ? ` (${r.unit})` : ""));
   } else {
-    title = `Virtual extensometer, gauge length ${fmt(r.gauge_mm, 2)} mm: strain ${fmt(100 * r.strain[r.strain.length - 1], 4)}% at the end`;
-    traces = [{ x: r.axis, y: pct(r.strain, true), mode: "lines+markers", marker: { size: 4 }, name: "strain" }];
+    const end = r.strain.length - 1;
+    title = `Virtual extensometer, gauge length ${fmt(r.gauge_mm, 2)} mm: strain ${fmt(100 * r.strain[end], 4)}% ± ${fmt(100 * r.strain_u95[end], 4)}% at the end (95%, ${withinText(r.strain[end], r.strain_u95[end])})`;
+    traces = [{ x: r.axis, y: pct(r.strain, true), mode: "lines+markers", marker: { size: 4 }, name: "strain", error_y: bars(pct(r.strain_u95, true)) }];
     layout = plotLayout(axisLabel, "Extensometer strain (%)");
   }
   layout.showlegend = false; layout.margin.t = 12;
@@ -899,9 +969,10 @@ async function runProbe() {
 }
 $("#probe-save").onclick = async () => {
   const r = state.probeResult; if (!r) return;
-  const table = r.kind === "line" ? { distance_mm: r.distance_mm, [r.quantity]: r.values }
-    : r.kind === "point" ? { axis: r.axis, [r.quantity]: r.values, ux_mm: r.ux, uz_mm: r.uz }
-    : { axis: r.axis, length_mm: r.length_mm, strain: r.strain };
+  const pm95 = "accuracy ± (95%)";
+  const table = r.kind === "line" ? { distance_mm: r.distance_mm, [r.quantity]: r.values, [pm95]: r.u95 }
+    : r.kind === "point" ? { axis: r.axis, [r.quantity]: r.values, [pm95]: r.u95, ux_mm: r.ux, [`ux ${pm95} mm`]: r.ux_u95, uz_mm: r.uz, [`uz ${pm95} mm`]: r.uz_u95 }
+    : { axis: r.axis, length_mm: r.length_mm, [`length ${pm95} mm`]: r.length_u95_mm, strain: r.strain, [`strain ${pm95}`]: r.strain_u95 };
   const saved = await api().save_probe(state.projectPath, `${r.kind} ${new Date().toISOString().slice(0, 19).replace(/[T:]/g, "-")}`, table);
   toast(saved.ok ? `Saved ${saved.path.split("/").pop()} (results/probes)` : saved.error);
 };

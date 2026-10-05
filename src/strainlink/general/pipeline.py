@@ -35,7 +35,7 @@ from ..dic.mask import MIN_FILL as MIN_SUBSET_FILL, SubsetMask
 from ..io.images import load_sequence
 from ..io.sensors import Channel
 from ..pipeline import (LazyImages, Progress, ProjectError, _clean, _json_default, _load_sensor_files, _resolve,
-                        corrected_images, load_project)
+                        accuracy_flags, corrected_images, load_project, measurement_accuracy)
 from ..strain import compute_strain, fill_displacement_gaps, measures
 from .events import MODE_NAMES, channel_events, zone_events
 from .findings import formation_order, zone_growth
@@ -269,6 +269,7 @@ def run(project_path: str | Path, progress: Progress | None = None) -> dict:
           "points": b.points.round(3), "width_mm": b.width_mm, "flags": b.flags} for b in fb.bands]
         for k, fb in enumerate(per_frame)]), default=_json_default))
     frames.to_csv(out_dir / "per_photo.csv", index=False)
+    statement = measurement_accuracy(out_dir, project, sequence.paths, sequence.time_source)
     summary = _clean({
         "kind": "general", "project": project.get("name", Path(project_path).stem),
         "synthetic": bool(project.get("synthetic", False)), "version": __version__,
@@ -286,7 +287,9 @@ def run(project_path: str | Path, progress: Progress | None = None) -> dict:
         "object_columns": obj_cols, "sensor_columns": sorted(sensor_cols, key=lambda c: c == timing.get("axis_channel")),
         "correlation": {"findings": [f.as_dict() for f in correlate.ranked(findings)],
                         "events": [asdict(e) for e in s_events + o_events], "warnings": warnings},
-        "flags": _flags(per_frame, timing, sequence.time_source, sequence.paths) + _marker_flags(marker_result),
+        "accuracy": statement,
+        "flags": (_flags(per_frame, timing, sequence.time_source, sequence.paths) + _marker_flags(marker_result)
+                  + accuracy_flags(statement)),
     })
     (out_dir / "summary.json").write_text(json.dumps(summary, indent=1, default=_json_default))
     report(STAGES[6], 1.0, "Done")

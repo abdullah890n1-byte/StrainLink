@@ -50,6 +50,34 @@ img{{max-width:100%}} .grid{{display:grid;grid-template-columns:repeat(auto-fill
 """
 
 
+def accuracy_section(summary: dict) -> str:
+    """How accurate the measured values are (summary["accuracy"], see strainlink.accuracy), as HTML."""
+    a = summary.get("accuracy")
+    if not a:
+        return ""
+    micro = lambda v: "—" if v is None else f"± {1e6 * v:.0f} µε"  # noqa: E731
+    names = {"exx": "Strain εxx of the object", "ezz": "Strain εzz of the object", "exz": "Shear strain εxz of the object"}
+    rows = []
+    if summary.get("kind") == "general":
+        for key, w in (a.get("whole_object") or {}).items():
+            rows.append(f"<tr><td>{names.get(key, key)}</td><td>{100 * w['value']:.3f}%</td><td>{micro(w['u95'])}</td>"
+                        f"<td>{html.escape(w['text'])}</td></tr>")
+    point = a["point"]
+    disp = point.get("displacement_mm")
+    px = point.get("displacement_px")
+    rows.append(f"<tr><td>Strain at one point</td><td></td><td>{micro(point.get('strain'))}</td><td></td></tr>")
+    rows.append(f"<tr><td>Displacement of one point</td><td></td><td>{'—' if disp is None else f'± {1000 * disp:.1f} µm'}</td>"
+                f"<td>{'' if not px else f'{px:.3f} px'}</td></tr>")
+    missing = "; ".join(html.escape(n) for n in a.get("not_included", []))
+    return (f"<h2>Accuracy of these results (95%)</h2>"
+            f"<p class='muted'>The true value is expected within the ± shown 95 times in 100. "
+            f"{'The images are compressed (JPEG or video), so a larger allowance is included. ' if a.get('compressed_images') else ''}"
+            f"</p><table><thead><tr><th>Result</th><th>Value (end of test)</th><th>Accuracy</th><th></th></tr></thead>"
+            f"<tbody>{''.join(rows)}</tbody></table>"
+            f"<p class='muted'><b>How it is known:</b> {html.escape(a.get('method', ''))}</p>"
+            f"<p class='muted'><b>Not included:</b> {missing}.</p>")
+
+
 def findings_section(findings: list[dict]) -> str:
     """The graded findings with their evidence, as HTML."""
     out = ""
@@ -224,6 +252,7 @@ def build(results_dir: str | Path) -> Path:
 <div class="meta">StrainLink {html.escape(summary['version'])} · analysed {html.escape(summary['finished'])} · {summary['frames']} photos · {summary['seconds']:.0f} s</div>
 {synthetic}
 <h2>Key results</h2><div class="cards">{card_html}</div>
+{accuracy_section(summary)}
 <h2>Needs your review</h2><ul class="flags">{flags_html}</ul>
 <h2>Findings (correlation engine)</h2>
 <p class="meta">Graded by the strength of the evidence. Every statement is computed from the data; open “Evidence and method” for the numbers.</p>

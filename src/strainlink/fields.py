@@ -16,6 +16,7 @@ from pathlib import Path
 
 import numpy as np
 
+from . import accuracy
 from .bands.ridges import fill_missing
 from .strain import compute_strain, measures
 
@@ -89,3 +90,74 @@ class FieldStore:
                 out = self._cache[(key, k)]
         self._cache[(key, k)] = out
         return out
+
+    def uncertainty(self, key: str, k: int, compressed: bool = False) -> np.ndarray:
+        """95% uncertainty of a quantity at every point of photo k, in the quantity's own unit.
+
+        Measured from the field's own fine-scale scatter (see strainlink.accuracy). The first
+        photo is the reference (zero by definition), so it takes the next photo's value: that
+        is the noise a zero reading would carry.
+        """
+        k = max(int(k), 1) if self.frames > 1 else 0
+        name = ("u95", key, k, compressed)
+        if name in self._cache:
+            return self._cache[name]
+        if key in ("ux", "uz"):
+            along = self.get("exx" if key == "ux" else "ezz", k)
+            out = accuracy.displacement_uncertainty(along, self.get(key, k), self.spacing, STRAIN_WINDOW, compressed)
+        elif key == "umag":
+            out = np.maximum(self.uncertainty("ux", k, compressed), self.uncertainty("uz", k, compressed))
+        else:
+            out = accuracy.point_uncertainty(self.get(key, k), compressed)
+        self._cache[name] = out
+        return out
+
+
+# Whole-object strains stated with their accuracy (the object's typical strain along each axis).
+STATEMENT_STRAINS = ("exx", "ezz", "exz")
+
+
+def accuracy_statement(store: FieldStore, compressed: bool = False, mm_per_px: float | None = None,
+                       lens_corrected: bool = False) -> dict:
+    """How accurate this analysis is: per point and for the whole object, per photo (95%).
+
+    A plain dictionary for summary.json, the app and the report.
+    """
+    last = store.frames - 1
+
+    def typical(key: str, k: int) -> float:
+        values = store.uncertainty(key, k, compressed)
+        return float(np.nanmedian(values)) if np.isfinite(values).any() else float("nan")
+
+    points = {key: typical(key, last) for key in (*STATEMENT_STRAINS, "gamma", "ux", "uz")}
+    displacement_mm = max(points["ux"], points["uz"])
+    whole, per_photo = {}, {key: [] for key in STATEMENT_STRAINS}
+    for key in STATEMENT_STRAINS:
+        for k in range(store.frames):
+            field = store.get(key, k)
+            known = np.isfinite(field)
+            if k == 0 or known.sum() < 9:
+                per_photo[key].append(None)
+                continue
+            value = float(np.median(field[known]))
+            stated = accuracy.average_uncertainty(value, accuracy.scatter(field).typical, int(known.sum()), compressed, STRAIN_WINDOW)
+            per_photo[key].append(stated if np.isfinite(stated) else None)
+            if k == last:
+                share = accuracy.relative(value, stated)
+                whole[key] = {"value": value, "u95": stated, "relative": share, "text": accuracy.describe(value, stated)}
+    peak = float(np.nanpercentile(np.abs(store.get("e1", last)), 99)) if last > 0 and np.isfinite(store.get("e1", last)).any() else float("nan")
+    return {
+        "confidence": "95%",
+        "point": {"strain": max(points[key] for key in STATEMENT_STRAINS), **points,
+                  "displacement_mm": displacement_mm,
+                  "displacement_px": displacement_mm / mm_per_px if mm_per_px else None},
+        "whole_object": whole, "per_photo": per_photo,
+        "peak_strain": peak,
+        "peak_relative": accuracy.relative(peak, max(points[key] for key in STATEMENT_STRAINS)),
+        "compressed_images": compressed, "lens_corrected": lens_corrected,
+        "method": ("Random part: measured from this analysis's own fine-scale scatter (2.5 x local scatter per point). "
+                   "Systematic part: allowances from tests with exact answers (25 microstrain, and 0.3% of the value, "
+                   "or 1.5% for JPEG or video frames). Checked on 20 known-answer cases: at least 95% of true errors "
+                   "were inside the stated accuracy in every one."),
+        "not_included": [n for n in accuracy.NOT_INCLUDED if not (lens_corrected and n.startswith("lens"))],
+    }

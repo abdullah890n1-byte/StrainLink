@@ -90,6 +90,36 @@ class RunSummary:
     flags: list[str] = field(default_factory=list)
 
 
+COMPRESSED_SUFFIXES = (".jpg", ".jpeg")
+
+
+def measurement_accuracy(out_dir: Path, project: dict, photo_paths, time_source: str) -> dict:
+    """The accuracy statement of a finished analysis (results/fields.npz must exist): see strainlink.accuracy."""
+    from .fields import FieldStore, accuracy_statement
+    compressed = time_source == "video" or any(Path(p).suffix.lower() in COMPRESSED_SUFFIXES for p in photo_paths)
+    calibration = project.get("calibration", {})
+    mm_per_px = calibration.get("mm_per_px")
+    return accuracy_statement(FieldStore(out_dir), compressed, float(mm_per_px) if mm_per_px else None,
+                              lens_corrected=bool(calibration.get("lens")))
+
+
+def accuracy_flags(statement: dict) -> list[str]:
+    """Review notes when the measured strain is not well above the measurement noise."""
+    from .accuracy import POOR_RELATIVE
+    share, peak = statement.get("peak_relative"), statement.get("peak_strain")
+    noise = statement["point"]["strain"]
+    if peak is None or not np.isfinite(peak) or not np.isfinite(noise):
+        return []
+    if share is None:
+        return [f"The strains in this test (largest {peak * 100:.3f}%) are smaller than the accuracy at a point "
+                f"(±{noise * 1e6:.0f} microstrain, 95%): the strain map shows mostly noise. Averages over an area "
+                f"(the typical strain, an extensometer) are more accurate."]
+    if share > POOR_RELATIVE:
+        return [f"The largest strain ({peak * 100:.3f}%) is only {1 / share:.0f} times the accuracy at a point "
+                f"(±{noise * 1e6:.0f} microstrain, 95%): read values from averages over an area, not single points."]
+    return []
+
+
 def lens_corrector(project: dict):
     """The lens correction of a project (calibration.lens, from a calibration-grid photo), or None."""
     lens = project.get("calibration", {}).get("lens")
@@ -259,7 +289,10 @@ def _run_wall(project_path: str | Path, project: dict, progress: Progress | None
                      "events": [asdict(e) for e in corr.events], "warnings": corr.warnings},
         flags=_flags(history, mech, timeline, sequence.time_source),
     )
-    (out_dir / "summary.json").write_text(json.dumps(asdict(summary), indent=1, default=_json_default))
+    # How accurate the measured fields are, stated with the results.
+    statement = _clean(measurement_accuracy(out_dir, project, sequence.paths, sequence.time_source))
+    saved = {**asdict(summary), "accuracy": statement}
+    (out_dir / "summary.json").write_text(json.dumps(saved, indent=1, default=_json_default))
     report(STAGES[7], 1.0, "Done")
     return summary
 
