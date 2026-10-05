@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 
 from .. import __version__
-from ..report import INK, STYLE, _num, _png, _style_axes, findings_section
+from ..report import INK, STYLE, _num, _png, _style_axes, accuracy_section, findings_section
 from .events import MODE_NAMES
 
 MODE_COLOURS = {"opening": "#e8590c", "shear": "#7048e8", "mixed": "#1098ad", "": INK}
@@ -106,6 +106,7 @@ def build_general(results_dir: Path, summary: dict) -> Path:
 <div class="meta">StrainLink {html.escape(summary['version'])} · any-test mode · analysed {html.escape(summary['finished'])} · {summary['frames']} photos · {summary['seconds']:.0f} s</div>
 {synthetic}
 <h2>Key results</h2><div class="cards">{card_html}</div>
+{accuracy_section(summary)}
 <h2>Needs your review</h2><ul class="flags">{flags_html}</ul>
 <h2>Findings (correlation engine)</h2>
 <p class="meta">Graded by the strength of the evidence. Every statement is computed from the data; open “Evidence and method” for the numbers.</p>

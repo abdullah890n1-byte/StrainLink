@@ -89,6 +89,7 @@ class _Analysis:
         self.push_mm = store.data["push_mm"]
         self._scales: dict[str, float] = {}
         self.undistort = None          # lens correction for the displayed photos (set by load)
+        self.compressed = False        # JPEG photos or video frames: a larger accuracy allowance (set by load)
 
     @classmethod
     def load(cls, project_path: str) -> "_Analysis":
@@ -107,6 +108,8 @@ class _Analysis:
         analysis = cls(project_path, FieldStore(folder / "results"), bands, list(seq.paths), wall)
         # The fields are in lens-corrected coordinates, so the photos are shown corrected too.
         analysis.undistort = pipeline.lens_corrector(project)
+        analysis.compressed = seq.time_source == "video" or any(
+            Path(p).suffix.lower() in pipeline.COMPRESSED_SUFFIXES for p in seq.paths)
         return analysis
 
     def _index(self, x, z) -> np.ndarray:
@@ -136,6 +139,21 @@ class _Analysis:
         measured = ndimage.map_coordinates(np.isfinite(field).astype(float), idx, order=0, mode="constant", cval=0.0)
         values = ndimage.map_coordinates(np.nan_to_num(field), idx, order=1, mode="constant", cval=0.0)
         return np.where(measured > 0.5, values, np.nan).reshape(np.shape(x_ref))
+
+    def uncertainty_at(self, key: str, k: int, x_ref, z_ref) -> np.ndarray:
+        """95% uncertainty of a quantity at reference positions (the nearest grid point's value)."""
+        field = self.store.uncertainty(key, k, self.compressed)
+        idx = self._index(x_ref, z_ref)
+        known = np.isfinite(field)
+        if not known.any():
+            return np.full(np.shape(x_ref), np.nan)
+        filled = np.where(known, field, np.nanmedian(field))
+        return ndimage.map_coordinates(filled, idx, order=0, mode="nearest").reshape(np.shape(x_ref))
+
+    def typical_uncertainty(self, key: str, k: int) -> float | None:
+        """Typical 95% uncertainty of a quantity over the measured area of photo k."""
+        field = self.store.uncertainty(key, k, self.compressed)
+        return float(np.nanmedian(field)) if np.isfinite(field).any() else None
 
     def near_edge(self, x_ref, z_ref) -> np.ndarray:
         """True where the DIC subset reaches the object's outline (a partial, edge-aware subset: noisier)."""
@@ -444,6 +462,16 @@ class Api:
         import pandas as pd
         per_photo = pd.read_csv(folder / "per_photo.csv")
         per_photo = per_photo.astype(object).where(per_photo.notna(), None).to_dict(orient="list")
+        if "accuracy" not in summary:
+            # Analysed before accuracy statements existed: work it out from the saved fields, once.
+            try:
+                a = self._analysis(project_path)
+                project = pipeline.load_project(project_path)
+                summary["accuracy"] = pipeline._clean(pipeline.measurement_accuracy(
+                    folder, project, a.photo_paths, "video" if a.compressed else ""))
+                (folder / "summary.json").write_text(json.dumps(summary, indent=1, default=pipeline._json_default))
+            except (OSError, KeyError, ValueError):
+                pass
         return {"ok": True, "summary": summary, "per_photo": per_photo}
 
     def frame(self, project_path: str, k: int, show_strain: bool = True, quantity: str = "gamma") -> dict:
@@ -501,7 +529,7 @@ class Api:
                 "height": display.shape[0], "bands": disp_bands, "push_mm": float(a.push_mm[k]),
                 "gamma_max": a.scale("gamma"), "quantity": q.key, "quantity_label": q.label,
                 "quantity_scale": a.scale(q.key), "signed": q.signed, "percent": q.percent, "unit": q.unit,
-                "display_scale": scale}
+                "display_scale": scale, "accuracy_u95": a.typical_uncertainty(q.key, k)}
 
     # --- inspection tools (Vic-2D style) -----------------------------------------
     def probe(self, project_path: str, kind: str, points: list, k: int, quantity: str = "exx",
@@ -528,8 +556,13 @@ class Api:
             series = [float(np.nanmean(a.value_at(q.key, j, gx, gz))) for j in frames]
             near_edge = a.near_edge(x_ref[:1], z_ref[:1])[0]
             u = [a.displacement_at(j, x_ref[:1], z_ref[:1]) for j in frames]
+            # Neighbouring grid points share their noise (overlapping subsets), so the 3 x 3 mean
+            # keeps the uncertainty of one point.
+            u95 = [float(a.uncertainty_at(q.key, j, x_ref[:1], z_ref[:1])[0]) for j in frames]
             return {"ok": True, "kind": kind, "axis": axis, "quantity": q.label, "unit": q.unit, "percent": q.percent,
-                    "values": clean(series), "ux": clean([v[0][0] for v in u]), "uz": clean([v[1][0] for v in u]),
+                    "values": clean(series), "u95": clean(u95), "ux": clean([v[0][0] for v in u]), "uz": clean([v[1][0] for v in u]),
+                    "ux_u95": clean([a.uncertainty_at("ux", j, x_ref[:1], z_ref[:1])[0] for j in frames]),
+                    "uz_u95": clean([a.uncertainty_at("uz", j, x_ref[:1], z_ref[:1])[0] for j in frames]),
                     "point_mm": [float(x_ref[0]), float(z_ref[0])], "near_edge": bool(near_edge)}
         if kind == "line":
             t = np.linspace(0, 1, LINE_SAMPLES)
@@ -538,6 +571,7 @@ class Api:
             distance = t * float(np.hypot(x_ref[1] - x_ref[0], z_ref[1] - z_ref[0]))
             return {"ok": True, "kind": kind, "distance_mm": clean(distance), "quantity": q.label, "unit": q.unit,
                     "percent": q.percent, "values": clean(a.value_at(q.key, int(k), xs, zs)), "photo": int(k),
+                    "u95": clean(a.uncertainty_at(q.key, int(k), xs, zs)),
                     "near_edge": [bool(v) for v in a.near_edge(xs, zs)]}
         if kind == "extensometer":
             lengths = []
@@ -545,8 +579,14 @@ class Api:
                 ux, uz = a.displacement_at(j, x_ref[:2], z_ref[:2])
                 lengths.append(float(np.hypot(x_ref[1] + ux[1] - x_ref[0] - ux[0], z_ref[1] + uz[1] - z_ref[0] - uz[0])))
             l0 = float(np.hypot(x_ref[1] - x_ref[0], z_ref[1] - z_ref[0]))
+            # The change in length is the difference of two displacements: their uncertainties add
+            # in quadrature (each end: the larger of its two components).
+            ends = [np.maximum(a.uncertainty_at("ux", j, x_ref[:2], z_ref[:2]), a.uncertainty_at("uz", j, x_ref[:2], z_ref[:2]))
+                    for j in frames]
+            length_u95 = np.array([float(np.hypot(e[0], e[1])) for e in ends])
             return {"ok": True, "kind": kind, "axis": axis, "gauge_mm": l0, "length_mm": clean(lengths),
-                    "strain": clean(np.array(lengths) / l0 - 1.0)}
+                    "strain": clean(np.array(lengths) / l0 - 1.0), "length_u95_mm": clean(length_u95),
+                    "strain_u95": clean(length_u95 / l0 if l0 > 0 else length_u95 * np.nan)}
         return {"ok": False, "error": f"unknown tool {kind}"}
 
     def export_fields(self, project_path: str, fmt: str = "csv") -> dict:
