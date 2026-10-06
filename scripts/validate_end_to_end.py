@@ -44,16 +44,20 @@ def main() -> None:
     parser.add_argument("--preset", default="medium", choices=["loose", "medium", "dense"])
     parser.add_argument("--texture", default="real", choices=["generated", "real"])
     parser.add_argument("--analyse-only", action="store_true", help="re-analyse the photos rendered earlier")
+    parser.add_argument("--push-step", type=float, default=1.0, help="wall push per photo, mm (default 1)")
+    parser.add_argument("--max-push", type=float, default=None, help="total wall push, mm (default: the preset's 60)")
     args = parser.parse_args()
 
-    folder = ROOT / "data" / "synthetic" / f"SYNTH_{args.texture}_{args.preset}"
+    fine = "" if args.push_step == 1.0 and args.max_push is None else f"_step{args.push_step:g}mm"
+    folder = ROOT / "data" / "synthetic" / f"SYNTH_{args.texture}_{args.preset}{fine}"
+    protocol = {"push_step_mm": args.push_step, "max_push_mm": args.max_push}
     if args.texture == "real":
         grey = np.asarray(Image.open(PHOTO).convert("L"), dtype=np.float64)
         patch = grey[PATCH_ROWS[0]:PATCH_ROWS[1], PATCH_COLS[0]:PATCH_COLS[1]]
-        spec = DemoSpec(preset=args.preset, texture_pixels=patch,
+        spec = DemoSpec(preset=args.preset, texture_pixels=patch, **protocol,
                         texture_source=f"real photo patch: PyPIV {PHOTO.name} rows {PATCH_ROWS} cols {PATCH_COLS} (GPL-3.0)")
     else:
-        spec = DemoSpec(preset=args.preset)
+        spec = DemoSpec(preset=args.preset, **protocol)
 
     started = time.perf_counter()
     if args.analyse_only and (folder / "project.json").exists():

@@ -117,3 +117,25 @@ def test_wall_push_is_read_at_the_wall_face_not_in_the_lagging_soil():
     # With too few columns measured, it falls back to the strip (and does not fail).
     few = x <= 25.0
     assert np.all(np.isfinite(sync.wall_push_from_dic(ux[:, few], x[few], z[few], height)))
+
+
+def test_link_is_reported_untestable_when_photos_are_too_far_apart():
+    """The tip passes every cell within about one photo: no statistics can establish the link, and it says so."""
+    levels = {"PT2": 273.0, "PT3": 195.0, "PT4": 117.0, "PT5": 39.0}
+    reach = {"PT2": 4.15, "PT3": 3.53, "PT4": 3.0, "PT5": 3.0}           # 1.15 mm in all, photos 1 mm apart
+    tips = [correlate.Event(f"band-1.reaches.{k}", "", "soil", v, 0.5, k) for k, v in reach.items()]
+    onsets = [correlate.Event(f"{k}.softening", "", "sensor", v + 0.5, 0.25, k) for k, v in reach.items()]
+    finding = next(f for f in correlate.analyse(onsets, [], tips, levels, pd.DataFrame({"push_mm": []}), [], []).findings
+                   if f.key == "cells-vs-tip")
+    assert finding.strength == "weak"                       # never strong on timing it cannot resolve
+    assert finding.evidence["timing resolved"] == "no"
+    note = next(c for c in finding.caveats if "too coarse to test" in c)
+    assert "every 0.14 mm" in note                           # 1.15 mm / 8 photos
+
+    # The same link with the cells reached well apart is resolved (and graded on its statistics).
+    spread = {"PT2": 13.3, "PT3": 12.1, "PT4": 10.8, "PT5": 9.1}
+    tips = [correlate.Event(f"band-1.reaches.{k}", "", "soil", v, 0.5, k) for k, v in spread.items()]
+    onsets = [correlate.Event(f"{k}.softening", "", "sensor", v + 0.5, 0.25, k) for k, v in spread.items()]
+    finding = next(f for f in correlate.analyse(onsets, [], tips, levels, pd.DataFrame({"push_mm": []}), [], []).findings
+                   if f.key == "cells-vs-tip")
+    assert finding.evidence["timing resolved"] == "yes" and finding.strength == "strong"

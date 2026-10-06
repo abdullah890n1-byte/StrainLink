@@ -287,7 +287,7 @@ def _run_wall(project_path: str | Path, project: dict, progress: Progress | None
         bands=_history_json(history),
         correlation={"findings": [f.as_dict() for f in corr.findings],
                      "events": [asdict(e) for e in corr.events], "warnings": corr.warnings},
-        flags=_flags(history, mech, timeline, sequence.time_source),
+        flags=_flags(history, mech, timeline, sequence.time_source) + _link_flags(corr.findings),
     )
     # How accurate the measured fields are, stated with the results.
     statement = _clean(measurement_accuracy(out_dir, project, sequence.paths, sequence.time_source))
@@ -425,6 +425,12 @@ def _history_json(history: TestBands) -> dict:
 def _bands_json(per_frame) -> list:
     return _clean([[{"name": b.name, "label": b.label, "points": b.points.round(2), "width_mm": b.width_mm,
                      "flags": b.flags} for b in fb.bands] for fb in per_frame])
+
+
+def _link_flags(findings) -> list[str]:
+    """Review notes for links the test could not resolve (so a weak grade is not read as 'no link')."""
+    from .correlate.engine import UNRESOLVED_NOTE
+    return [f"{f.title}: {c}" for f in findings for c in f.caveats if UNRESOLVED_NOTE in c]
 
 
 def _flags(history: TestBands, mech, timeline, time_source: str) -> list[str]:
