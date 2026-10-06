@@ -47,6 +47,13 @@ MIN_DISTINCT_CHANGES = 5
 MIN_SPREAD_MM = 1e-6
 # Coincidence: two events within this many combined standard deviations.
 COINCIDENCE_SIGMAS = 2.0
+# Cells-vs-tip: the pushes at which the tip reaches the cells must be spread over at least this
+# many times their own uncertainty (about half a photo spacing), or the cells cannot be told
+# apart in time and the link cannot be tested however real it is.
+RESOLVING_SIGMAS = 4.0
+# Photos to aim for between the tip reaching the first and the last cell.
+PHOTOS_ACROSS_CELLS = 8
+UNRESOLVED_NOTE = "too coarse to test"
 SEED = 20260928
 
 
@@ -97,7 +104,7 @@ def cell_softening_hypothesis(sensor_events: list[Event], tip_events: list[Event
     caveats: list[str] = []
     title = "Pressure-cell softening vs band-1 tip"
     method = ("Regression of each cell's softening onset on the push at which band-1's tip reaches the cell's level; "
-              "exact permutation test over cell assignments; comparison with a common-onset model.")
+              "exact one-sided permutation test over cell assignments; comparison with a common-onset model.")
     if len(paired) < 2:
         return Finding("cells-vs-tip", title,
                        "Too few pressure cells both softened and were reached by band-1 to test the link.",
@@ -117,6 +124,11 @@ def cell_softening_hypothesis(sensor_events: list[Event], tip_events: list[Event
         return Finding("cells-vs-tip", title,
                        f"Cannot be tested at this photo spacing: band-1's tip reached {', '.join(paired)} between "
                        f"the same two photos.", "not supported", method, evidence, caveats)
+    reach_sigma = float(np.median([reaches[c].sigma_mm for c in paired]))
+    spread = float(np.ptp(reach))
+    resolved = spread >= RESOLVING_SIGMAS * reach_sigma
+    evidence.update({"tip reaches the cells over (mm of push)": round(spread, 2),
+                     "tip-reach uncertainty (mm)": round(reach_sigma, 2), "timing resolved": "yes" if resolved else "no"})
     if len(paired) >= 3:
         fit = stats.linregress(reach, onset)
         t = stats.t.ppf(0.975, len(paired) - 2)
@@ -145,6 +157,15 @@ def cell_softening_hypothesis(sensor_events: list[Event], tip_events: list[Event
         caveats.append(f"{', '.join(softened_not_reached)} softened although the tip never reached them.")
         if strength == "strong":
             strength = "moderate"
+    if not resolved:
+        # The cells were passed too close together for the photos to separate them: whatever the
+        # statistics say, this test cannot establish (or rule out) the link.
+        wanted = spread / PHOTOS_ACROSS_CELLS
+        caveats.append(f"The photo spacing is {UNRESOLVED_NOTE} this link: band-1's tip reached {', '.join(paired)} "
+                       f"within {spread:.1f} mm of push, known to ±{reach_sigma:.1f} mm each. Take a photo at least "
+                       f"every {wanted:.2f} mm of push while the band grows.")
+        if strength in ("strong", "moderate"):
+            strength = "weak"
     if strength == "not supported":
         statement = ("Pressure-cell softening does NOT follow band-1's tip reaching each cell: the timing is better "
                      "explained otherwise (see evidence).")
@@ -160,15 +181,20 @@ def cell_softening_hypothesis(sensor_events: list[Event], tip_events: list[Event
 
 
 def _permutation_p(x: np.ndarray, y: np.ndarray) -> float:
-    """Exact (small n) or Monte-Carlo permutation p-value for |correlation|."""
-    observed = abs(np.corrcoef(x, y)[0, 1])
+    """Exact (small n) or Monte-Carlo permutation p-value for a positive correlation (one-sided).
+
+    One-sided because the hypothesis is directional: a cell reached later softens later. A
+    strongly reversed order is not evidence for it, and counting it (a two-sided test) doubled p
+    with four cells.
+    """
+    observed = np.corrcoef(x, y)[0, 1]
     n = len(x)
     if n <= 7:
         perms = itertools.permutations(range(n))
-        values = [abs(np.corrcoef(x, y[list(p)])[0, 1]) for p in perms]
+        values = [np.corrcoef(x, y[list(p)])[0, 1] for p in perms]
     else:
         rng = np.random.default_rng(SEED)
-        values = [abs(np.corrcoef(x, rng.permutation(y))[0, 1]) for _ in range(PERMUTATIONS)]
+        values = [np.corrcoef(x, rng.permutation(y))[0, 1] for _ in range(PERMUTATIONS)]
     return float(np.mean(np.array(values) >= observed - 1e-12))
 
 

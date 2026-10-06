@@ -178,9 +178,14 @@ def compare(project_dir: str | Path) -> dict:
                             _fmt(true_reach, 1, "mm"), f"{err:+.1f} mm", f"±{TOL_TIP_REACH_MM:.0f} mm", abs(err) <= TOL_TIP_REACH_MM))
     finding = next((f for f in summary["correlation"]["findings"] if f["key"] == "cells-vs-tip"), None)
     if finding is not None:
+        # StrainLink may report that the photos are too far apart to test the link: then a weak
+        # grade is a flagged limitation of the test, not a silent miss.
+        unresolved = any("too coarse to test" in flag for flag in summary["flags"])
         checks.append(Check("Correlation engine", "Finds the built-in link: cells soften when the band tip reaches them",
                             finding["strength"], "present (built into the test)", "", "graded strong or moderate",
-                            finding["strength"] in ("strong", "moderate"), finding["statement"]))
+                            finding["strength"] in ("strong", "moderate"),
+                            "StrainLink reported that the photo spacing is too coarse to test this link" if unresolved else finding["statement"],
+                            flagged=unresolved))
 
     return _result(checks, truth)
 

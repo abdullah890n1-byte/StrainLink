@@ -50,6 +50,7 @@ class DemoSpec:
     preset: str = "medium"
     mm_per_px: float = 1.0
     push_step_mm: float = 1.0          # one photo per this much wall push
+    max_push_mm: float | None = None   # total wall push (None: the preset's own, 60 mm)
     image_noise_grey: float = 1.5      # camera noise (grey levels)
     grain_radius_px: float = 2.0
     seed: int = 11
@@ -106,7 +107,8 @@ def make_demo(folder: str | Path, spec: DemoSpec | None = None,
     (folder / "images").mkdir(parents=True, exist_ok=True)
     experiment = WallExperiment(preset(spec.preset))
     sensors: SensorSpec = sensor_preset(spec.preset)
-    sensors = SensorSpec(**{**sensors.__dict__, "camera_interval_s": spec.push_step_mm / sensors.push_rate_mm_s})
+    sensors = SensorSpec(**{**sensors.__dict__, "camera_interval_s": spec.push_step_mm / sensors.push_rate_mm_s,
+                            **({"max_push_mm": spec.max_push_mm} if spec.max_push_mm else {})})
     logs = generate(experiment, sensors)
     wall_height = experiment.spec.wall_height_mm
     frame, shape = _frame(spec, wall_height)
