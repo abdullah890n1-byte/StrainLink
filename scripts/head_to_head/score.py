@@ -65,6 +65,9 @@ def score_case(case, table: pd.DataFrame) -> dict:
     out = {"case": case.name, "title": case.title, "points": int(len(t)), "coverage": len(cells) / total_cells,
            "disp_rms_px": float(np.sqrt(np.mean(u_err**2 + v_err**2))), "disp_max_px": float(np.max(np.hypot(u_err, v_err))),
            "u_bias_px": float(np.mean(u_err)), "v_bias_px": float(np.mean(v_err)), "v_positive": "down" if v_sign > 0 else "up"}
+    if "wavelength_px" in case.meta:
+        # Share of the wave's amplitude that was recovered (least-squares projection on the true wave).
+        out["amplitude_recovered"] = float(np.sum(t["u"].to_numpy(float) * true["u"]) / np.sum(true["u"] ** 2))
     if {"exx", "eyy", "exy"} <= set(t.columns):
         deep = ((x >= x0 + STRAIN_MARGIN_PX) & (x < x1 - STRAIN_MARGIN_PX)
                 & (y >= y0 + STRAIN_MARGIN_PX) & (y < y1 - STRAIN_MARGIN_PX))
@@ -107,6 +110,13 @@ def write_report() -> None:
     lines += ["", "## Strain error (µε RMS)", "", "| Case | " + " | ".join(names) + " |", "|---|" + "---|" * len(names)]
     for name in order:
         lines.append(f"| {titles[name]} | " + " | ".join(cell(p, name, "strain_rms", 1e6, 0) for p in programs) + " |")
+    lines += ["", "## Fine detail: share of a displacement wave's amplitude recovered (%)", "",
+              "100% = no blurring. Read with the noise on static images: a program can buy low noise by averaging "
+              "over more of the image, and then recovers less of a short wave.", "",
+              "| Case | " + " | ".join(names) + " |", "|---|" + "---|" * len(names)]
+    for name in order:
+        if name.startswith("wave_"):
+            lines.append(f"| {titles[name]} | " + " | ".join(cell(p, name, "amplitude_recovered", 100, 1) for p in programs) + " |")
     lines += ["", "## Share of the area measured (%)", "", "| Case | " + " | ".join(names) + " |", "|---|" + "---|" * len(names)]
     for name in order:
         lines.append(f"| {titles[name]} | " + " | ".join(cell(p, name, "coverage", 100, 0) for p in programs) + " |")

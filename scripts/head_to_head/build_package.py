@@ -12,12 +12,15 @@ import shutil
 from common import (AOI_INSET_PX, PACKAGE, STEP_PX, STRAIN_WINDOW_POINTS, SUBSET_PX, aoi, cases, suite_folder)
 
 from strainlink.io.images import list_images
+from strainlink.synth import cases as C
 
 
 def main() -> None:
     PACKAGE.mkdir(parents=True, exist_ok=True)
     rows = []
     for case in cases():
+        if "wavelength_px" in case.meta and not (suite_folder(case) / "photos").exists():
+            C.render_case(case, suite_folder(case))
         photos = list_images(suite_folder(case) / "photos")
         target = PACKAGE / case.name
         if target.exists():

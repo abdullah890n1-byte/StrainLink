@@ -35,16 +35,21 @@ def main() -> None:
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument("--update-reference", action="store_true", help="update the reference at every photo")
+    parser.add_argument("--element", type=int, default=SUBSET_PX, help="element size, px")
+    parser.add_argument("--only", nargs="*", help="only these cases")
     args = parser.parse_args()
     logging.getLogger().setLevel(logging.WARNING)
-    out = RESULTS / ("mudic_updated" if args.update_reference else "mudic")
+    name = "mudic_updated" if args.update_reference else "mudic"
+    out = RESULTS / (name if args.element == SUBSET_PX else f"{name}_element{args.element}")
     out.mkdir(parents=True, exist_ok=True)
     for folder in sorted(p for p in Path(PACKAGE).iterdir() if p.is_dir()):
+        if args.only and folder.name not in args.only:
+            continue
         started = time.perf_counter()
         stack = dic.image_stack_from_folder(str(folder) + "/", file_type=".tif")
         rows, cols = stack[0].shape
         x0, y0, x1, y1 = AOI_INSET_PX, AOI_INSET_PX, cols - AOI_INSET_PX, rows - AOI_INSET_PX
-        n_elx, n_ely = round((x1 - x0) / SUBSET_PX), round((y1 - y0) / SUBSET_PX)
+        n_elx, n_ely = round((x1 - x0) / args.element), round((y1 - y0) / args.element)
         mesh = dic.Mesher(deg_e=1, deg_n=1, type="q4").mesh(stack, Xc1=x0, Xc2=x1, Yc1=y0, Yc2=y1,
                                                              n_elx=n_elx, n_ely=n_ely, GUI=False)
         try:

@@ -40,14 +40,31 @@ CASE_NAMES = ("translation", "rotation", "tension", "compression", "shear", "ben
               "large_strain", "noise_high", "low_contrast", "blur", "lighting")
 
 
+# Fine-detail cases: a displacement wave of this amplitude at each wavelength (px). How much of
+# the amplitude a program recovers shows how much it blurs; the static case shows its noise.
+WAVE_AMPLITUDE_PX = 0.5
+WAVELENGTHS_PX = (200, 100, 60, 40)
+WAVE_PHOTOS = 3
+
+
+def wave_cases() -> list:
+    from strainlink.synth import cases as C
+    return [C.Case(f"wave_{w}", f"Displacement wave, wavelength {w} px (amplitude {WAVE_AMPLITUDE_PX} px)",
+                   C.wave(WAVE_AMPLITUDE_PX, float(w)), photos=WAVE_PHOTOS, seed=3, meta={"wavelength_px": w})
+            for w in WAVELENGTHS_PX]
+
+
 def cases() -> list:
     import vic2d_tasks
     wanted = {c.name: c for c in vic2d_tasks.cases()}
-    return [wanted[name] for name in CASE_NAMES]
+    return [wanted[name] for name in CASE_NAMES] + wave_cases()
 
 
 def suite_folder(case) -> Path:
+    """Where a case's photos come from: the task suite's folder, or (wave cases) one rendered here."""
     import vic2d_tasks
+    if "wavelength_px" in case.meta:
+        return ROOT / "data" / "head_to_head" / "rendered" / case.name
     return vic2d_tasks.OUT / case.name
 
 

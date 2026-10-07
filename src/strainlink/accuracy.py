@@ -46,6 +46,9 @@ MIN_RING_POINTS = 12
 BIAS_FLOOR_STRAIN = 25e-6
 BIAS_FRACTION_LOSSLESS = 0.003
 BIAS_FRACTION_COMPRESSED = 0.015
+# Displacement in compressed images: JPEG's blocks bias the matching by a share of the movement
+# (strong JPEG, quality 60: 95% of errors within 2.2% of it once interpolation error was removed).
+DISPLACEMENT_FRACTION_COMPRESSED = 0.03
 # Whole-object averages: neighbouring points share their noise over about one strain window.
 DEFAULT_STRAIN_WINDOW = 5
 # A value is "small compared with the noise" when its uncertainty exceeds this share of it.
@@ -117,7 +120,7 @@ def displacement_uncertainty(strain_along: np.ndarray, displacement: np.ndarray,
     random = np.where(np.isfinite(displacement), DISPLACEMENT_FACTOR * local * abs(spacing) * window_factor(window), np.nan)
     if not compressed:
         return random
-    return np.sqrt(random**2 + (BIAS_FRACTION_COMPRESSED * np.abs(displacement)) ** 2)
+    return np.sqrt(random**2 + (DISPLACEMENT_FRACTION_COMPRESSED * np.abs(displacement)) ** 2)
 
 
 def average_uncertainty(value: float, typical_scatter: float, points: int, compressed: bool = False,

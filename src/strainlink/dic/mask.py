@@ -22,10 +22,11 @@ from scipy import ndimage
 
 from .icgn import subset_offsets
 
-# Pixels this close to the outline are left out: their grey level can be a blend of
-# object and background (lens blur), so they move with neither. The automatic outline
-# already errs inside the object (general.region), so one pixel is enough there.
-EDGE_MARGIN_PX = 1
+# Pixels this close to the outline are left out: their grey level can be a blend of object and
+# background (lens blur), and the interpolating spline of a pixel reaches its neighbours (two for
+# the quintic spline), so a pixel next to the outline still carries some of the background's step.
+# With 1 px a subset at a sharp edge was off by up to 0.037 px; with 2 px, 0.007 px.
+EDGE_MARGIN_PX = 2
 # A subset needs at least this share of its pixels on the object (a point on a
 # straight edge has about half).
 MIN_FILL = 0.4
