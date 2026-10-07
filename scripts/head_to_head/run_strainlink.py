@@ -27,13 +27,18 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--reference", choices=["incremental", "fixed"], default="incremental",
                         help="incremental: updated every photo (StrainLink's default); fixed: always the first photo")
+    parser.add_argument("--subset", type=int, default=SUBSET_PX, help="subset size, px (odd)")
+    parser.add_argument("--only", nargs="*", help="only these cases")
     args = parser.parse_args()
-    out = RESULTS / ("strainlink" if args.reference == "incremental" else "strainlink_fixed")
+    name = "strainlink" if args.reference == "incremental" else "strainlink_fixed"
+    out = RESULTS / (name if args.subset == SUBSET_PX else f"{name}_subset{args.subset}")
     out.mkdir(parents=True, exist_ok=True)
-    radius = SUBSET_PX // 2
+    radius = args.subset // 2
     settings = DICSettings(subset_radius=radius, step=STEP_PX, search_radius=10, reference_mode=args.reference,
                            update_every=1 if args.reference == "incremental" else 0)
     for case in cases():
+        if args.only and case.name not in args.only:
+            continue
         started = time.perf_counter()
         images = [load_grayscale(p) for p in list_images(PACKAGE / case.name)]
         grid = Grid.over_roi(aoi(case.shape), STEP_PX, radius)          # subsets stay inside the area of interest

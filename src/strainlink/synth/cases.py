@@ -160,6 +160,15 @@ def plate_with_hole(stress_over_e: float, poisson: float, radius_px: float, cent
     return f
 
 
+def wave(amplitude_px: float, wavelength_px: float) -> Field:
+    """A displacement wave: u = A sin(2 pi Y / wavelength), v = 0 (spatial-resolution test).
+
+    A program that averages over a region much smaller than the wavelength recovers the full
+    amplitude; one that averages over more of it recovers less.
+    """
+    return lambda X, Y, t: (amplitude_px * t * np.sin(2.0 * np.pi * Y / wavelength_px), np.zeros_like(Y))
+
+
 def large_tension(strain: float, poisson_like: float, centre: tuple[float, float]) -> Field:
     """Large uniaxial stretch (rubber-like): stretch λ = 1 + strain along X, λ^-ν across."""
     def f(X, Y, t):
