@@ -1,0 +1,2 @@
+packaging/*.bat text eol=crlf
+packaging/*.iss text eol=crlf

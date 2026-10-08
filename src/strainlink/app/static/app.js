@@ -3,7 +3,14 @@
 
 const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
-const api = () => window.pywebview.api;
+// Windows gives paths with backslashes. The interface and the engine both work with
+// forward slashes, so every path coming from the engine is converted once, here.
+const slashes = (v) => typeof v === "string" ? (/^[A-Za-z]:\\|^\\\\/.test(v) ? v.replace(/\\/g, "/") : v)
+  : Array.isArray(v) ? v.map(slashes)
+  : (v && typeof v === "object") ? Object.fromEntries(Object.entries(v).map(([k, x]) => [k, slashes(x)])) : v;
+const api = () => new Proxy(window.pywebview.api, {
+  get: (target, name) => typeof target[name] === "function" ? async (...args) => slashes(await target[name](...args)) : target[name],
+});
 const css = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 const fmt = (v, d = 2, unit = "") => (v === null || v === undefined || Number.isNaN(v)) ? "—" : `${Number(v).toFixed(d)}${unit ? " " + unit : ""}`;
 // Accuracy (95%) shown with a result. Strains read best in microstrain (1 µε = 0.0001%).
@@ -248,7 +255,7 @@ document.addEventListener("dragover", (e) => { e.preventDefault(); $("#dropzone"
 document.addEventListener("dragleave", () => $("#dropzone").classList.remove("over"));
 document.addEventListener("drop", async (e) => {
   e.preventDefault(); $("#dropzone").classList.remove("over");
-  const file = e.dataTransfer.files[0]; const path = file && (file.pywebviewFullPath || file.path);
+  const file = e.dataTransfer.files[0]; const path = file && slashes(file.pywebviewFullPath || file.path);
   if (!path) return toast("Could not read the dropped item — please use “Choose test folder…”.");
   if ($("#view-wizard").classList.contains("hidden")) startWizard();
   if (state.step !== 0) goStep(0);
