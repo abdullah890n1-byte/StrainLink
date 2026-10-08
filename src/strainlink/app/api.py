@@ -22,6 +22,7 @@ from PIL import Image
 from scipy import ndimage
 
 from .. import __version__, pipeline, report
+from . import system
 from ..calib import WallFrame
 from ..dic import load_grayscale
 from ..bands.ridges import fill_missing
@@ -31,7 +32,7 @@ from ..io.sensors import load_sensors
 from ..io import video as video_io
 from ..synth.demo import DemoSpec, make_demo
 
-APP_DIR = Path.home() / "Library" / "Application Support" / "StrainLink"
+APP_DIR = system.user_data_dir()
 RECENT_FILE = APP_DIR / "recent.json"
 DEFAULTS_FILE = APP_DIR / "defaults.json"
 # Names that mark a calibration (no-soil pushover) run rather than the test log.
@@ -629,6 +630,5 @@ class Api:
         return {"ok": True, "path": str(path)}
 
     def reveal(self, path: str) -> dict:
-        import subprocess
-        subprocess.run(["open", "-R", path], check=False)
+        system.reveal(path)
         return {"ok": True}

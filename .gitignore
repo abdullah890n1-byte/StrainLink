@@ -17,3 +17,7 @@ src/strainlink/app/static/plotly.min.js
 
 # Local development build of the Mac app (make with scripts/make_mac_app.py)
 StrainLink.app/
+
+# Installer builds (packaging/)
+build/
+dist/
