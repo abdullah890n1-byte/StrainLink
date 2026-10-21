@@ -20,7 +20,7 @@ def test_pipeline_runs_and_writes_results(small_project):
     results = small_project.parent / "results"
     for name in ("summary.json", "fields.npz", "bands.json", "per_photo.csv"):
         assert (results / name).exists()
-    truth = json.loads((small_project.parent / "truth.json").read_text())
+    truth = json.loads((small_project.parent / "truth.json").read_text(encoding="utf-8"))
     assert summary.mechanics["passive"]["peak"] == pytest.approx(truth["peak_force_kN"], rel=0.02)
     assert summary.sync["source"] == "dic"
     # Coarse, short test: the photo-to-logger match must be within its *stated* uncertainty.
@@ -41,6 +41,6 @@ def test_pipeline_runs_and_writes_results(small_project):
 def test_missing_sensor_file_gives_a_clear_message(tmp_path):
     project = tmp_path / "project.json"
     project.write_text(json.dumps({"calibration": {"mm_per_px": 1, "toe_px": [10, 10], "wall_height_mm": 100},
-                                   "images": {"folder": "nowhere"}}))
+                                   "images": {"folder": "nowhere"}}), encoding="utf-8")
     with pytest.raises(pipeline.ProjectError, match="No photos found"):
         pipeline.run(project)

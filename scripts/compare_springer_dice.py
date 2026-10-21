@@ -90,11 +90,11 @@ def decode(frame: np.ndarray, cols: np.ndarray, rows: np.ndarray, scale) -> np.n
 
 def main() -> None:
     OUT.mkdir(parents=True, exist_ok=True)
-    project = json.loads(PROJECT.read_text())
+    project = json.loads(PROJECT.read_text(encoding="utf-8"))
     mm_per_px = project["calibration"]["mm_per_px"]
     fields = np.load(RESULTS / "fields.npz")
-    summary = json.loads((RESULTS / "summary.json").read_text())
-    bands = json.loads((RESULTS / "bands.json").read_text())
+    summary = json.loads((RESULTS / "summary.json").read_text(encoding="utf-8"))
+    bands = json.loads((RESULTS / "bands.json").read_text(encoding="utf-8"))
     height = summary["frame"]["height_px"]
     with open(PROJECT.parent / project["images"]["folder"] / "frames.csv") as f:
         video_frames = [int(r["video_frame"]) for r in csv.DictReader(f)]
@@ -157,7 +157,7 @@ def main() -> None:
         fig.savefig(OUT / f"{name.lower()}.png", dpi=120)
         plt.close(fig)
     result["crack"] = crack_timing(fields, bands, summary, video_frames, ref_col, ref_row, x, z, mm_per_px)
-    (OUT / "summary.json").write_text(json.dumps(result, indent=2))
+    (OUT / "summary.json").write_text(json.dumps(result, indent=2), encoding="utf-8")
     print(json.dumps(result, indent=2))
 
 

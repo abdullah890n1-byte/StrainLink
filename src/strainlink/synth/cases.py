@@ -74,10 +74,10 @@ def render_case(case: Case, folder: Path) -> Path:
         _write(folder / "photos", k, image, case)
     project = {"kind": "general", "name": f"{case.title} (SYNTHETIC DATA)", "synthetic": True,
                "images": {"folder": "photos", "interval_s": 1.0}, "calibration": {"mm_per_px": case.mm_per_px}}
-    (folder / "project.json").write_text(json.dumps(project, indent=2))
+    (folder / "project.json").write_text(json.dumps(project, indent=2), encoding="utf-8")
     (folder / "case.json").write_text(json.dumps({"name": case.name, "title": case.title, "meta": case.meta,
                                                   "photos": case.photos, "shape": case.shape,
-                                                  "mm_per_px": case.mm_per_px}, indent=1))
+                                                  "mm_per_px": case.mm_per_px}, indent=1), encoding="utf-8")
     return folder / "project.json"
 
 

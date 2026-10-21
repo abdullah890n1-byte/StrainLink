@@ -267,7 +267,7 @@ def run(project_path: str | Path, progress: Progress | None = None) -> dict:
     (out_dir / "bands.json").write_text(json.dumps(_clean([
         [{"name": _track_name(tracks, k, b), "label": "zone", "mode": kin[k][id(b)].mode if id(b) in kin[k] else "",
           "points": b.points.round(3), "width_mm": b.width_mm, "flags": b.flags} for b in fb.bands]
-        for k, fb in enumerate(per_frame)]), default=_json_default))
+        for k, fb in enumerate(per_frame)]), default=_json_default), encoding="utf-8")
     frames.to_csv(out_dir / "per_photo.csv", index=False)
     statement = measurement_accuracy(out_dir, project, sequence.paths, sequence.time_source)
     summary = _clean({
@@ -291,7 +291,7 @@ def run(project_path: str | Path, progress: Progress | None = None) -> dict:
         "flags": (_flags(per_frame, timing, sequence.time_source, sequence.paths) + _marker_flags(marker_result)
                   + accuracy_flags(statement)),
     })
-    (out_dir / "summary.json").write_text(json.dumps(summary, indent=1, default=_json_default))
+    (out_dir / "summary.json").write_text(json.dumps(summary, indent=1, default=_json_default), encoding="utf-8")
     report(STAGES[6], 1.0, "Done")
     return summary
 

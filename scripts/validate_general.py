@@ -41,7 +41,7 @@ def main() -> None:
         run(project)
         print(f"[{mode}] analysed in {time.perf_counter() - started:.0f} s")
         result = compare(folder)
-        (folder / "results" / "accuracy.json").write_text(json.dumps(result, indent=2, ensure_ascii=False))
+        (folder / "results" / "accuracy.json").write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8")
         print(f"[{mode}] Known-answer check: {result['passed']} of {result['total']} within tolerance "
               f"(flagged {result['flagged']}, silent {result['silent']})")
         for c in result["checks"]:

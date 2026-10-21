@@ -57,8 +57,8 @@ def main() -> None:
     parser.add_argument("--source", default=str(ROOT / "data" / "synthetic" / "SYNTH_demo_medium"))
     args = parser.parse_args()
     source = Path(args.source)
-    project = json.loads((source / "project.json").read_text())
-    truth = json.loads((source / "truth.json").read_text())
+    project = json.loads((source / "project.json").read_text(encoding="utf-8"))
+    truth = json.loads((source / "truth.json").read_text(encoding="utf-8"))
     interval = float(project["images"]["interval_s"])
     photos = list_images(source / project["images"]["folder"])
 
@@ -81,7 +81,7 @@ def main() -> None:
 
     project["name"] = project["name"].replace("(SYNTHETIC DATA)", "— from an H.264 video (SYNTHETIC DATA)")
     project["images"] = {"folder": frames_folder(video).name, "video": video.name, "video_every_s": spacing}
-    (folder / "project.json").write_text(json.dumps(project, indent=2))
+    (folder / "project.json").write_text(json.dumps(project, indent=2), encoding="utf-8")
 
     started = time.perf_counter()
     summary = pipeline.run(folder / "project.json")
@@ -90,7 +90,7 @@ def main() -> None:
     result = compare(folder)
     result["video"] = {"size_mb": video.stat().st_size / 1e6, "psnr_median_db": float(np.median(quality)),
                        "psnr_min_db": float(min(quality))}
-    (folder / "results" / "accuracy.json").write_text(json.dumps(result, indent=2, ensure_ascii=False))
+    (folder / "results" / "accuracy.json").write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8")
     print(f"\nKnown-answer check: {result['passed']} of {result['total']} within tolerance")
     for check in result["checks"]:
         if not check["ok"]:

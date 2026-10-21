@@ -96,7 +96,7 @@ def build(destination: Path) -> Path:
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory() as tmp:
         source = Path(tmp) / "launcher.c"
-        source.write_text(LAUNCHER_C)
+        source.write_text(LAUNCHER_C, encoding="utf-8")
         subprocess.run(["clang", "-O2", "-Wall", f'-DPYTHON="{python}"', f'-DLOG_DIR="{LOG_DIR}"',
                         str(source), "-o", str(macos / "StrainLink")], check=True)
     _icns(resources / "StrainLink.icns")

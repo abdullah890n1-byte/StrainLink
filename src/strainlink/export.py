@@ -28,7 +28,7 @@ def export(results_dir: str | Path, fmt: str = "csv") -> Path:
     keys = list(QUANTITIES)
     axis = store.data.get("push_mm", np.arange(store.frames, dtype=float))
     try:
-        compressed = bool(json.loads((results_dir / "summary.json").read_text()).get("accuracy", {}).get("compressed_images"))
+        compressed = bool(json.loads((results_dir / "summary.json").read_text(encoding="utf-8")).get("accuracy", {}).get("compressed_images"))
     except (OSError, json.JSONDecodeError):
         compressed = False
     if fmt == "mat":
@@ -54,5 +54,5 @@ def export(results_dir: str | Path, fmt: str = "csv") -> Path:
         "Axis value of each photo (wall push, displacement or time): " + json.dumps(np.round(axis, 6).tolist()) + "\n\n"
         + "\n".join(f"{k}: {q.label}" + (f" ({q.unit})" if q.unit else "") for k, q in QUANTITIES.items()) + "\n\n"
         + "<name>_accuracy95: the 95% accuracy of that quantity at each point (the true value is expected within\n"
-          "± this, 95 times in 100), in the quantity's own unit; given for " + ", ".join(WITH_ACCURACY) + ".\n")
+          "± this, 95 times in 100), in the quantity's own unit; given for " + ", ".join(WITH_ACCURACY) + ".\n", encoding="utf-8")
     return out

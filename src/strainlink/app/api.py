@@ -96,11 +96,11 @@ class _Analysis:
     def load(cls, project_path: str) -> "_Analysis":
         project = pipeline.load_project(project_path)
         folder = Path(project_path).parent
-        bands = json.loads((folder / "results" / "bands.json").read_text())
+        bands = json.loads((folder / "results" / "bands.json").read_text(encoding="utf-8"))
         cal = project["calibration"]
         if project.get("kind") == "general":
             from ..general.pipeline import image_frame
-            shape = json.loads((folder / "results" / "summary.json").read_text())["frame"]
+            shape = json.loads((folder / "results" / "summary.json").read_text(encoding="utf-8"))["frame"]
             wall = image_frame(float(cal["mm_per_px"]), (int(shape["height_px"]), int(shape["width_px"])))
         else:
             wall = WallFrame(float(cal["mm_per_px"]), float(cal["toe_px"][0]), float(cal["toe_px"][1]),
@@ -202,7 +202,7 @@ class Api:
 
     def _recent(self) -> list[dict]:
         try:
-            items = json.loads(RECENT_FILE.read_text())
+            items = json.loads(RECENT_FILE.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             return []
         return [i for i in items if Path(i["path"]).exists()]
@@ -210,17 +210,17 @@ class Api:
     def _remember(self, project_path: str, name: str) -> None:
         items = [i for i in self._recent() if i["path"] != project_path]
         items.insert(0, {"path": project_path, "name": name})
-        RECENT_FILE.write_text(json.dumps(items[:MAX_RECENT], indent=1))
+        RECENT_FILE.write_text(json.dumps(items[:MAX_RECENT], indent=1), encoding="utf-8")
 
     def defaults(self) -> dict:
         """Test details used last time (unit weight, wall size, cell depths), to prefill the form."""
         try:
-            return json.loads(DEFAULTS_FILE.read_text())
+            return json.loads(DEFAULTS_FILE.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             return {}
 
     def save_defaults(self, values: dict) -> dict:
-        DEFAULTS_FILE.write_text(json.dumps(values, indent=1))
+        DEFAULTS_FILE.write_text(json.dumps(values, indent=1), encoding="utf-8")
         return {"ok": True}
 
     def scan_test_folder(self, folder: str) -> dict:
@@ -373,7 +373,7 @@ class Api:
         try:
             path_obj.parent.mkdir(parents=True, exist_ok=True)
             clean = {k: v for k, v in project.items() if not k.startswith("_")}
-            path_obj.write_text(json.dumps(clean, indent=2))
+            path_obj.write_text(json.dumps(clean, indent=2), encoding="utf-8")
         except OSError as error:
             return {"ok": False, "error": str(error)}
         self._remember(str(path_obj), project.get("name", path_obj.parent.name))
@@ -450,14 +450,14 @@ class Api:
                           progress=lambda f, m: self._report("Creating the demo test (synthetic photos and logs)", f, m))
             pipeline.run(project_path, progress=self._report)
             report.build(folder / "results")
-        self._remember(str(project_path), json.loads(project_path.read_text()).get("name", preset))
+        self._remember(str(project_path), json.loads(project_path.read_text(encoding="utf-8")).get("name", preset))
         return {"project": str(project_path)}
 
     # --- results ----------------------------------------------------------------
     def results(self, project_path: str) -> dict:
         folder = Path(project_path).parent / "results"
         try:
-            summary = json.loads((folder / "summary.json").read_text())
+            summary = json.loads((folder / "summary.json").read_text(encoding="utf-8"))
         except OSError:
             return {"ok": False, "error": "This analysis has not been run yet."}
         import pandas as pd
@@ -470,7 +470,7 @@ class Api:
                 project = pipeline.load_project(project_path)
                 summary["accuracy"] = pipeline._clean(pipeline.measurement_accuracy(
                     folder, project, a.photo_paths, "video" if a.compressed else ""))
-                (folder / "summary.json").write_text(json.dumps(summary, indent=1, default=pipeline._json_default))
+                (folder / "summary.json").write_text(json.dumps(summary, indent=1, default=pipeline._json_default), encoding="utf-8")
             except (OSError, KeyError, ValueError):
                 pass
         return {"ok": True, "summary": summary, "per_photo": per_photo}

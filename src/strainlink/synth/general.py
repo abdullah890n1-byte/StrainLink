@@ -190,7 +190,7 @@ def make_general_test(folder: str | Path, spec: GeneralSpec | None = None) -> Pa
         "sensors": {"file": "logger.csv"},
         "sync": {"mode": "auto"},
     }
-    (folder / "project.json").write_text(json.dumps(project, indent=2))
+    (folder / "project.json").write_text(json.dumps(project, indent=2), encoding="utf-8")
     truth = {
         "kind": "general", "synthetic": True, "mode": spec.mode, "onset_photo": spec.onset_photo,
         "zone_angle_deg": spec.zone_angle_deg, "zone_points_mm": line[on][::40].round(3).tolist(),
@@ -214,6 +214,6 @@ def make_general_test(folder: str | Path, spec: GeneralSpec | None = None) -> Pa
                             "displacement_px": moves}
         project["markers"] = {"polarity": "dark", "diameter_px": [0.8 * 2 * spec.marker_radius_px,
                                                                   2.5 * 2 * spec.marker_radius_px]}
-        (folder / "project.json").write_text(json.dumps(project, indent=2))
-    (folder / "truth.json").write_text(json.dumps(truth, indent=1))
+        (folder / "project.json").write_text(json.dumps(project, indent=2), encoding="utf-8")
+    (folder / "truth.json").write_text(json.dumps(truth, indent=1), encoding="utf-8")
     return folder / "project.json"
