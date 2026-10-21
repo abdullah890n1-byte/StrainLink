@@ -1,0 +1,81 @@
+# Tests on every push; installers for Windows and macOS on request (Actions tab → "Build" →
+# "Run workflow") and for every version tag (v0.1.0, ...). The installers appear as
+# downloadable artifacts of the run, and on the release page for a tag.
+name: Build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write          # to attach installers to a release (tags only)
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install
+        run: python -m pip install -e ".[dev]"
+      - name: Unit tests
+        run: python -m pytest -q
+
+  windows:
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
+    needs: tests
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Inno Setup
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) { choco install innosetup -y --no-progress }
+      - name: Build the installer (packaging\build_windows.bat, which ends with the self-test)
+        shell: cmd
+        env:
+          BUILD_PYTHON: python
+        run: packaging\build_windows.bat
+      - uses: actions/upload-artifact@v4
+        with:
+          name: StrainLink-Windows-Setup
+          path: dist/StrainLink-*-Windows-Setup.exe
+          if-no-files-found: error
+      - uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/v')
+        with:
+          files: dist/StrainLink-*-Windows-Setup.exe
+
+  macos:
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
+    needs: tests
+    runs-on: macos-14          # Apple Silicon
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install
+        run: python -m pip install -e . pyinstaller==6.22.3
+      - name: Build the app and disk image (packaging/build_mac.py, which ends with the self-test)
+        run: python packaging/build_mac.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: StrainLink-macOS
+          path: dist/StrainLink-*-macOS-*.dmg
+          if-no-files-found: error
+      - uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/v')
+        with:
+          files: dist/StrainLink-*-macOS-*.dmg

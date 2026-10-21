@@ -8,6 +8,12 @@ cd /d "%~dp0\.."
 
 echo.
 echo === 1 of 6: Python environment ===
+rem An automatic build (GitHub Actions) names its own Python in BUILD_PYTHON; on a PC the
+rem script makes a private environment in build\winenv from Python 3.12.
+if defined BUILD_PYTHON (
+    set PY=%BUILD_PYTHON%
+    goto :have_python
+)
 where py >nul 2>nul
 if errorlevel 1 (
     echo Python was not found. Install Python 3.12 from https://www.python.org/downloads/windows/
@@ -22,6 +28,7 @@ if not exist build\winenv\Scripts\python.exe (
     )
 )
 set PY=build\winenv\Scripts\python.exe
+:have_python
 
 echo.
 echo === 2 of 6: Libraries (a few minutes the first time, about 600 MB) ===
@@ -59,6 +66,7 @@ echo === 6 of 6: Installer ===
 for /f "delims=" %%v in ('%PY% -c "import strainlink; print(strainlink.__version__)"') do set VERSION=%%v
 set ISCC=%ProgramFiles(x86)%\Inno Setup 6\ISCC.exe
 if not exist "%ISCC%" set ISCC=%ProgramFiles%\Inno Setup 6\ISCC.exe
+if not exist "%ISCC%" if defined CI goto :failed
 if not exist "%ISCC%" (
     echo Inno Setup 6 was not found, so no Setup.exe was made.
     echo The program itself is ready in dist\StrainLink  ^(run StrainLink.exe^).
@@ -74,11 +82,12 @@ echo Installer ready: dist\StrainLink-%VERSION%-Windows-Setup.exe
 :done
 echo.
 echo Finished.
-pause
+rem An automatic build (CI) has nobody to press a key.
+if not defined CI pause
 exit /b 0
 
 :failed
 echo.
 echo The build did not finish. Nothing was installed on this computer outside this folder.
-pause
+if not defined CI pause
 exit /b 1
