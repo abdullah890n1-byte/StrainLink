@@ -145,7 +145,7 @@ def corrected_images(project: dict, images):
 def load_project(path: str | Path) -> dict:
     path = Path(path)
     try:
-        project = json.loads(path.read_text())
+        project = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
         raise ProjectError(f"Could not read the project file {path.name}: {error}") from error
     project["_dir"] = str(path.parent)
@@ -274,7 +274,7 @@ def _run_wall(project_path: str | Path, project: dict, progress: Progress | None
     report(STAGES[7], 0.0, "Writing results")
     np.savez_compressed(out_dir / "fields.npz", x_mm=x_mm, z_mm=z_mm, gamma=gamma, ux=ux_all, uz=uz_all,
                         valid=tracked.valid.reshape((n,) + grid.shape), push_mm=timeline.frame_push_mm)
-    (out_dir / "bands.json").write_text(json.dumps(_bands_json(per_frame), default=_json_default))
+    (out_dir / "bands.json").write_text(json.dumps(_bands_json(per_frame), default=_json_default), encoding="utf-8")
     frames_table.to_csv(out_dir / "per_photo.csv", index=False)
     summary = RunSummary(
         project=project.get("name", Path(project_path).stem), synthetic=bool(project.get("synthetic", False)),
@@ -292,7 +292,7 @@ def _run_wall(project_path: str | Path, project: dict, progress: Progress | None
     # How accurate the measured fields are, stated with the results.
     statement = _clean(measurement_accuracy(out_dir, project, sequence.paths, sequence.time_source))
     saved = {**asdict(summary), "accuracy": statement}
-    (out_dir / "summary.json").write_text(json.dumps(saved, indent=1, default=_json_default))
+    (out_dir / "summary.json").write_text(json.dumps(saved, indent=1, default=_json_default), encoding="utf-8")
     report(STAGES[7], 1.0, "Done")
     return summary
 

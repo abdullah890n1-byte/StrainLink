@@ -91,7 +91,7 @@ def test_flag_when_the_strain_is_below_the_noise():
 
 def test_statement_is_saved_and_survives_json(tension):
     _, folder, _ = tension
-    saved = json.loads((folder / "results" / "summary.json").read_text())["accuracy"]
+    saved = json.loads((folder / "results" / "summary.json").read_text(encoding="utf-8"))["accuracy"]
     assert saved["confidence"] == "95%" and saved["not_included"]
     again = accuracy_statement(FieldStore(folder / "results"), False, 0.05)
     assert again["point"]["strain"] == pytest.approx(saved["point"]["strain"])

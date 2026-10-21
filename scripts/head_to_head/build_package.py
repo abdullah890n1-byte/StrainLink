@@ -78,7 +78,7 @@ writes `reports/head_to_head.md`: displacement error (RMS, px) over the whole
 area, strain error (RMS, µε) away from its edge, and the share of the area
 each program measured, next to every other program scored so far.
 """
-    (PACKAGE / "SETTINGS.md").write_text(sheet)
+    (PACKAGE / "SETTINGS.md").write_text(sheet, encoding="utf-8")
     print(f"Package: {PACKAGE} ({len(rows)} cases)")
 
 

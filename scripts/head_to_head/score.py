@@ -87,7 +87,7 @@ def score_case(case, table: pd.DataFrame) -> dict:
 def write_report() -> None:
     programs = []
     for path in sorted(RESULTS.glob("*/scores.json")):
-        programs.append(json.loads(path.read_text()))
+        programs.append(json.loads(path.read_text(encoding="utf-8")))
     if not programs:
         return
     names = [p["program"] for p in programs]
@@ -121,7 +121,7 @@ def write_report() -> None:
     for name in order:
         lines.append(f"| {titles[name]} | " + " | ".join(cell(p, name, "coverage", 100, 0) for p in programs) + " |")
     REPORT.parent.mkdir(exist_ok=True)
-    REPORT.write_text("\n".join(lines) + "\n")
+    REPORT.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def main() -> None:
@@ -145,7 +145,7 @@ def main() -> None:
               f"points {row['points']}  area measured {100 * row['coverage']:.0f}%")
     slug = re.sub(r"[^a-z0-9]+", "_", args.program.lower()).strip("_")
     (RESULTS / slug).mkdir(parents=True, exist_ok=True)
-    (RESULTS / slug / "scores.json").write_text(json.dumps({"program": args.program, "note": args.note, "cases": rows}, indent=1))
+    (RESULTS / slug / "scores.json").write_text(json.dumps({"program": args.program, "note": args.note, "cases": rows}, indent=1), encoding="utf-8")
     write_report()
     print(f"Report: {REPORT}")
 

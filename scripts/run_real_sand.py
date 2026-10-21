@@ -139,7 +139,7 @@ def main() -> None:
         })
         fields.append((label, u, v, gamma, found))
 
-    (OUT / "summary.json").write_text(json.dumps(results, indent=2, ensure_ascii=False))
+    (OUT / "summary.json").write_text(json.dumps(results, indent=2, ensure_ascii=False), encoding="utf-8")
     figure(images, soil, X, Y, fields, mm_per_px)
     print(json.dumps({k: v for k, v in results.items() if k != "steps"}, indent=2))
     for s in results["steps"]:

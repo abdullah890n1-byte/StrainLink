@@ -69,7 +69,7 @@ def small_crack_test(tmp_path_factory):
 
 
 def test_small_crack_test_end_to_end(small_crack_test):
-    summary = json.loads((small_crack_test / "results" / "summary.json").read_text())
+    summary = json.loads((small_crack_test / "results" / "summary.json").read_text(encoding="utf-8"))
     assert summary["kind"] == "general"
     zones = summary["zones"]
     assert zones and zones[0]["mode"] == "opening"

@@ -77,10 +77,10 @@ def find_truth(project_dir: Path) -> Path:
 def compare(project_dir: str | Path) -> dict:
     """All checks for an analysed synthetic project. Raises FileNotFoundError without truth.json."""
     project_dir = Path(project_dir)
-    truth = json.loads(find_truth(project_dir).read_text())
+    truth = json.loads(find_truth(project_dir).read_text(encoding="utf-8"))
     if truth.get("kind") == "general":
         return _result(compare_general(project_dir, truth), truth)
-    summary = json.loads((project_dir / "results" / "summary.json").read_text())
+    summary = json.loads((project_dir / "results" / "summary.json").read_text(encoding="utf-8"))
     checks: list[Check] = []
     m, p = summary["mechanics"], summary["bands"]["primary"]
 
@@ -214,7 +214,7 @@ LINK_STRENGTHS = ("strong", "moderate")
 
 
 def compare_general(project_dir: Path, truth: dict) -> list[Check]:
-    summary = json.loads((project_dir / "results" / "summary.json").read_text())
+    summary = json.loads((project_dir / "results" / "summary.json").read_text(encoding="utf-8"))
     import pandas as pd
     per_photo = pd.read_csv(project_dir / "results" / "per_photo.csv")
     checks: list[Check] = []
@@ -249,7 +249,7 @@ def compare_general(project_dir: Path, truth: dict) -> list[Check]:
     if main is None:
         checks.append(Check("Localisation zone", "Zone found", "none", "one zone", "missed", "found", False))
         return checks
-    bands = json.loads((project_dir / "results" / "bands.json").read_text())
+    bands = json.loads((project_dir / "results" / "bands.json").read_text(encoding="utf-8"))
     last = next((b for b in bands[-1] if b["name"] == main["name"]), None)
     mode_word = {"opening": "crack (opening)", "shear": "shear band (sliding)", "mixed": "mixed"}
     checks.append(Check("Localisation zone", "Type of zone", mode_word.get(main["mode"], main["mode"]),

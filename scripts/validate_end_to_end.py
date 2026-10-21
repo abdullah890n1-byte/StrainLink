@@ -72,7 +72,7 @@ def main() -> None:
     report.build(folder / "results")
 
     result = compare(folder)
-    (folder / "results" / "accuracy.json").write_text(json.dumps(result, indent=2, ensure_ascii=False))
+    (folder / "results" / "accuracy.json").write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8")
     print(f"Known-answer check: {result['passed']} of {result['total']} within tolerance")
     for check in result["checks"]:
         mark = "ok " if check["ok"] else "OUT"

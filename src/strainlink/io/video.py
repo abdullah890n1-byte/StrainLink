@@ -122,11 +122,11 @@ def extract(video: str | Path, every_s: float | None = None, folder: str | Path 
     if not np.all(np.diff(times) > 0):
         # Presentation times missing or unreliable in this file: fall back to the nominal frame rate.
         rows = [(name, i, i / info.fps) for name, i, _ in rows]
-    with open(out / FRAMES_FILE, "w", newline="") as f:
+    with open(out / FRAMES_FILE, "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
         writer.writerow(["file", "video_frame", "time_s"])
         writer.writerows((name, i, f"{t:.6f}") for name, i, t in rows)
-    (out / SOURCE_FILE).write_text(json.dumps({**source, "info": asdict(info), "spacing_s": spacing}, indent=1))
+    (out / SOURCE_FILE).write_text(json.dumps({**source, "info": asdict(info), "spacing_s": spacing}, indent=1), encoding="utf-8")
     if progress:
         progress(1.0, f"{len(rows)} frames ready")
     return out, info, spacing
@@ -134,7 +134,7 @@ def extract(video: str | Path, every_s: float | None = None, folder: str | Path 
 
 def _up_to_date(folder: Path, source: dict) -> bool:
     try:
-        saved = json.loads((folder / SOURCE_FILE).read_text())
+        saved = json.loads((folder / SOURCE_FILE).read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return False
     return all(saved.get(k) == v for k, v in source.items()) and (folder / FRAMES_FILE).exists()
@@ -145,5 +145,5 @@ def read_frame_times(folder: str | Path) -> dict[str, float] | None:
     path = Path(folder) / FRAMES_FILE
     if not path.exists():
         return None
-    with open(path, newline="") as f:
+    with open(path, newline="", encoding="utf-8") as f:
         return {row["file"]: float(row["time_s"]) for row in csv.DictReader(f)}

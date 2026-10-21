@@ -75,7 +75,7 @@ def score(case: C.Case, folder: Path, corrected: bool) -> dict:
            "worst_ezz_error": float(np.max(np.abs(ezz - true_ezz)))}
     if corrected:
         # In corrected coordinates the positions are the ideal ones, so the exact answer applies.
-        summary = json.loads((folder / "results" / "summary.json").read_text())
+        summary = json.loads((folder / "results" / "summary.json").read_text(encoding="utf-8"))
         X, Y = f["x_mm"] / MM_PER_PX, summary["frame"]["height_px"] - f["z_mm"] / MM_PER_PX
         tu, tv = case.field(X, Y, 1.0)
         u, v = f["ux"][k] / MM_PER_PX, -f["uz"][k] / MM_PER_PX
@@ -105,10 +105,10 @@ def main() -> None:
             if folder.exists():
                 shutil.rmtree(folder)
             shutil.copytree(base / "raw", folder)
-            project = json.loads((folder / "project.json").read_text())
+            project = json.loads((folder / "project.json").read_text(encoding="utf-8"))
             if corrected:
                 project["calibration"]["lens"] = model.to_json()
-            (folder / "project.json").write_text(json.dumps(project, indent=2))
+            (folder / "project.json").write_text(json.dumps(project, indent=2), encoding="utf-8")
             run(folder / "project.json")
             r = score(case, folder, corrected)
             results.append(r)
@@ -119,7 +119,7 @@ def main() -> None:
         shutil.rmtree(base / "raw")
     (ROOT / "reports").mkdir(exist_ok=True)
     (ROOT / "reports" / "lens_validation.json").write_text(json.dumps(
-        {"lens": model.to_json(), "results": results}, indent=1))
+        {"lens": model.to_json(), "results": results}, indent=1), encoding="utf-8")
 
 
 if __name__ == "__main__":

@@ -31,7 +31,7 @@ FAR_FROM_ZONE_MM = 4.0
 def check(case: C.Case) -> dict:
     folder = vic2d_tasks.OUT / case.name / "results"
     f = np.load(folder / "fields.npz")
-    summary = json.loads((folder / "summary.json").read_text())
+    summary = json.loads((folder / "summary.json").read_text(encoding="utf-8"))
     mm = case.mm_per_px
     X, Y = f["x_mm"] / mm, summary["frame"]["height_px"] - f["z_mm"] / mm
     k = len(f["ux"]) - 1
@@ -85,7 +85,7 @@ def independent() -> list[dict]:
         if not (results / "fields.npz").exists():
             continue
         f = np.load(results / "fields.npz")
-        truth = json.loads((synthetic / name / "truth.json").read_text())
+        truth = json.loads((synthetic / name / "truth.json").read_text(encoding="utf-8"))
         points = np.column_stack([f["x_mm"].ravel(), f["z_mm"].ravel()])
         far = cKDTree(np.asarray(truth["zone_points_mm"], float)).query(points)[0].reshape(f["x_mm"].shape) > FAR_FROM_ZONE_MM
         worst = 100.0
@@ -149,8 +149,8 @@ def main() -> None:
     for e in extra:
         lines.append(f"| {e['data']} | {e['strain_coverage']:.1f}% |")
         print(f"  {e['data']}: {e['strain_coverage']:.1f}%")
-    (ROOT / "reports" / "accuracy_validation.json").write_text(json.dumps({"suite": rows, "independent": extra}, indent=1))
-    (ROOT / "reports" / "accuracy_validation.md").write_text("\n".join(lines) + "\n")
+    (ROOT / "reports" / "accuracy_validation.json").write_text(json.dumps({"suite": rows, "independent": extra}, indent=1), encoding="utf-8")
+    (ROOT / "reports" / "accuracy_validation.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
     scored = [r for r in rows if not r["limit"]]
     print(f"\nPer-point strain coverage ≥ {TARGET:.0f}%: {sum(r['strain_coverage'] >= TARGET for r in scored)} of {len(scored)}; "
           f"displacement: {sum(r['displacement_coverage'] >= TARGET for r in scored)} of {len(scored)}; "

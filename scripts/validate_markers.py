@@ -37,7 +37,7 @@ def main() -> None:
     if not (args.analyse_only and project.exists()):
         project = make_general_test(folder, SPEC)
     summary = run(project)
-    truth = json.loads((folder / "truth.json").read_text())["markers"]
+    truth = json.loads((folder / "truth.json").read_text(encoding="utf-8"))["markers"]
     true_centres = np.asarray(truth["centres_px"])
     true_moves = np.asarray(truth["displacement_px"])               # (frames, markers, 2)
     m = summary["markers"]
@@ -49,7 +49,7 @@ def main() -> None:
 
     tracker_err, dic_truth_err = [], []
     fields = np.load(folder / "results" / "fields.npz")
-    mm = json.loads(project.read_text())["calibration"]["mm_per_px"]
+    mm = json.loads(project.read_text(encoding="utf-8"))["calibration"]["mm_per_px"]
     x_mm, z_mm = fields["x_mm"], fields["z_mm"]
     grid_cols = x_mm[0] / mm
     height = summary["frame"]["height_px"]
@@ -83,7 +83,7 @@ def main() -> None:
     (folder / "results" / "marker_validation.json").write_text(json.dumps({
         "painted": len(true_centres), "found": m["found"], "tracker_rms_px": float(np.sqrt(np.mean(tracker**2))),
         "dic_vs_markers_rms_px": m["rms_px"], "dic_vs_truth_rms_px": float(np.sqrt(np.mean(dic_truth**2))),
-        "in_zones": m["in_zones"], "rms_in_zones_px": m["rms_in_zones_px"]}, indent=2))
+        "in_zones": m["in_zones"], "rms_in_zones_px": m["rms_in_zones_px"]}, indent=2), encoding="utf-8")
 
 
 if __name__ == "__main__":

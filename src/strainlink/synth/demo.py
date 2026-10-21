@@ -151,8 +151,8 @@ def make_demo(folder: str | Path, spec: DemoSpec | None = None,
         "bands": [[{"name": b.name, "label": b.label, "points": b.centreline[::20].round(2).tolist()} for b in t.bands]
                   for t in truths],
     }
-    (folder / "project.json").write_text(json.dumps(project, indent=2))
-    (folder / "truth.json").write_text(json.dumps(truth, indent=1, default=lambda v: None))
+    (folder / "project.json").write_text(json.dumps(project, indent=2), encoding="utf-8")
+    (folder / "truth.json").write_text(json.dumps(truth, indent=1, default=lambda v: None), encoding="utf-8")
     if progress:
         progress(1.0, "Demo test ready")
     return folder / "project.json"

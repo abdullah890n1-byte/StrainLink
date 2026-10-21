@@ -79,7 +79,7 @@ def cases() -> list[C.Case]:
 def score(case: C.Case, folder: Path) -> dict:
     res = folder / "results"
     f = np.load(res / "fields.npz")
-    summary = json.loads((res / "summary.json").read_text())
+    summary = json.loads((res / "summary.json").read_text(encoding="utf-8"))
     mm = case.mm_per_px
     height = summary["frame"]["height_px"]
     X, Y = f["x_mm"] / mm, height - f["z_mm"] / mm
@@ -220,15 +220,15 @@ def main() -> None:
     if args.only:
         # A partial run updates its own cases and keeps the others' last results.
         saved = REPORT / "vic2d_tasks.json"
-        previous = {r["case"]: r for r in json.loads(saved.read_text())} if saved.exists() else {}
+        previous = {r["case"]: r for r in json.loads(saved.read_text(encoding="utf-8"))} if saved.exists() else {}
         previous.update({r["case"]: r for r in results})
         results = [previous[c.name] for c in cases() if c.name in previous]
-    (REPORT / "vic2d_tasks.json").write_text(json.dumps(results, indent=1))
+    (REPORT / "vic2d_tasks.json").write_text(json.dumps(results, indent=1), encoding="utf-8")
     lines = ["| Case | Result | Displacement RMS (px) | Strain RMS (µε) | Task result |", "|---|---|---|---|---|"]
     for r in results:
         mark = {True: "✅ pass", False: "❌ fail", None: "⚠ known 2D limit"}[r["pass"]]
         lines.append(f"| {r['title']} | {mark} | {r['disp_rms_px']:.4f} | {r['strain_rms'] * 1e6:.0f} | {r.get('result', '')} |")
-    (REPORT / "vic2d_tasks.md").write_text("\n".join(lines) + "\n")
+    (REPORT / "vic2d_tasks.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 if __name__ == "__main__":

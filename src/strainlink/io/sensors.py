@@ -84,7 +84,7 @@ def read_table(path: str | Path) -> pd.DataFrame:
     if path.suffix.lower() in {".xlsx", ".xlsm", ".xls"}:
         raw = pd.read_excel(path, header=None)
     else:
-        text = path.read_text(errors="replace")
+        text = path.read_text(encoding="utf-8", errors="replace")
         delimiter = _detect_delimiter(text)
         raw = pd.read_csv(path, header=None, sep=delimiter, engine="python", skip_blank_lines=True,
                           on_bad_lines="skip", skiprows=_table_start(text, delimiter))
