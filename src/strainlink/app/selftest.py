@@ -14,7 +14,7 @@ import time
 import traceback
 from pathlib import Path
 
-from .system import user_data_dir
+from .system import is_packaged, user_data_dir
 
 LOG_NAME = "selftest.log"
 
@@ -54,7 +54,9 @@ def run() -> int:
                 raise RuntimeError(f"the crack was not found (zones: {kinds})")
         # The interface: its files must be where the app looks for them, and the window toolkit
         # must load (it is imported, not opened).
-        from .main import STATIC
+        from .main import STATIC, _ensure_chart_library
+        if not is_packaged():
+            _ensure_chart_library()          # as the app does at start (a fresh copy of the code lacks it)
         missing = [name for name in ("index.html", "app.js", "app.css", "plotly.min.js") if not (STATIC / name).is_file()]
         if missing:
             raise RuntimeError(f"interface files missing from {STATIC}: {', '.join(missing)}")
