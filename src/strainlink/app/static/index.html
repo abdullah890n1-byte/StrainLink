@@ -182,10 +182,11 @@
   <section id="view-results" class="view hidden">
     <div class="reshead">
       <div><h2 id="res-title"></h2><div id="res-meta" class="muted small"></div></div>
-      <div class="resbtns"><button id="btn-report" class="primary">Open report</button><select id="export-format" title="Every field of every photo, for other software"><option value="">Export data…</option><option value="csv">CSV (one file per photo)</option><option value="mat">MATLAB file (.mat)</option></select><button id="btn-finder">Show in Finder</button></div>
+      <div class="resbtns"><button id="btn-report" class="primary">Open report</button><select id="export-format" title="Every field of every photo, for other software"><option value="">Export data…</option><option value="csv">CSV (one file per photo)</option><option value="mat">MATLAB file (.mat)</option></select><button id="btn-ml" title="Experimental: a machine-learning model (trained on synthetic tests) marks where it thinks failure zones are. The analysis itself is not changed.">AI failure zones</button><button id="btn-finder">Show in Finder</button></div>
     </div>
     <div id="res-synthetic" class="synthetic hidden">SYNTHETIC DATA — a generated test with known answers, not a real experiment.</div>
     <div class="cards" id="res-cards"></div>
+    <div id="res-ml" class="noteitem hidden"></div>
     <div class="tabs" id="res-tabs">
       <button data-tab="overview" class="on">Overview</button><button data-tab="soil"><span class="wall-only">Slip surface</span><span class="general-only">Deformation</span></button><button data-tab="findings">Findings</button><button data-tab="review">Review <span id="review-count" class="count"></span></button><button data-tab="accuracy" id="tab-accuracy" class="hidden">Accuracy ✓</button>
     </div>
