@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "strainlink"
-version = "0.1.0"
+version = "0.2.0"
 description = "DIC for any test (soil, concrete, metals, rubber, ...) with sensor fusion and an evidence-based AI correlation engine"
 readme = "README.md"
 requires-python = ">=3.11"
