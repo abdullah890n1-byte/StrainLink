@@ -26,7 +26,7 @@ from . import system
 from ..calib import WallFrame
 from ..dic import load_grayscale
 from ..bands.ridges import fill_missing
-from ..fields import QUANTITIES, FieldStore
+from ..fields import OPTIONAL, QUANTITIES, FieldStore
 from ..io.images import load_sequence
 from ..io.sensors import load_sensors
 from ..io import video as video_io
@@ -166,6 +166,8 @@ class _Analysis:
 
     def scale(self, key: str) -> float:
         """Colour scale of a quantity: its 99th percentile magnitude in the last photo."""
+        if key == "zone_probability":
+            return 1.0                                   # a probability: full colour at 1
         if key not in self._scales:
             last = np.abs(self.store.get(key, self.store.frames - 1))
             self._scales[key] = float(np.nanpercentile(last, 99)) if np.isfinite(last).any() else 1.0
@@ -489,10 +491,30 @@ class Api:
             self._frame_cache[key] = result
             return result
 
-    def quantities(self) -> list[dict]:
-        """What the viewer and the inspection tools can show."""
+    def quantities(self, project_path: str | None = None) -> list[dict]:
+        """What the viewer and the inspection tools can show (for one analysis: what it has)."""
+        store = self._analysis(project_path).store if project_path else None
         return [{"key": q.key, "label": q.label, "unit": q.unit, "signed": q.signed, "percent": q.percent}
-                for q in QUANTITIES.values()]
+                for q in QUANTITIES.values() if (store.available(q.key) if store else q.key not in OPTIONAL)]
+
+    def run_ml_zones(self, project_path: str) -> dict:
+        """Run the experimental AI failure-zone model on an analysis (an add-on; the analysis is unchanged)."""
+        from ..ml.apply import run_on_analysis
+        try:
+            result = run_on_analysis(project_path)
+        except (OSError, ValueError) as error:
+            return {"ok": False, "error": str(error)}
+        # The viewer reloads the analysis so the new quantity can be shown.
+        self._viewed = None
+        self._frame_cache.clear()
+        return {"ok": True, **result}
+
+    def ml_zones(self, project_path: str) -> dict:
+        """The AI model's summary for an analysis, if it was run."""
+        path = Path(project_path).parent / "results" / "ml_zones.json"
+        if not path.exists():
+            return {"ok": False}
+        return {"ok": True, **json.loads(path.read_text(encoding="utf-8"))}
 
     def _analysis(self, project_path: str) -> _Analysis:
         """Results of one analysis, loaded once and kept while it is being viewed."""

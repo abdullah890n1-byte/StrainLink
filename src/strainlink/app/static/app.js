@@ -553,7 +553,7 @@ async function openResults(path) {
   state.kind = s.kind === "general" ? "general" : "wall";
   document.body.classList.toggle("kind-general", isGeneral());
   if (isGeneral()) { renderGeneralCards(s); fillPickers(s, r.per_photo); } else renderCards(s);
-  renderFindings(s); renderReview(s); renderAccuracy(path);
+  renderFindings(s); renderReview(s); renderAccuracy(path); renderMl(path);
   const n = s.frames - 1;
   [$("#scrub-overview"), $("#scrub-soil")].forEach((el) => { el.max = n; el.value = n; });
   state.frame = n;
@@ -895,7 +895,8 @@ function overlayColours(f, v) {
     : `<div>${esc(f.quantity_label)}: red = high (full colour at ${v(f.quantity_scale)})</div>`;
 }
 async function fillQuantities() {
-  if (!state.quantities) state.quantities = await api().quantities();
+  // Per analysis: the AI failure-zone probability is listed only when the model was run on it.
+  state.quantities = await api().quantities(state.projectPath);
   $("#overlay-quantity").innerHTML = state.quantities.map((q) => `<option value="${q.key}">${esc(q.label)}</option>`).join("");
   $("#overlay-quantity").value = state.quantity || "gamma";
 }
@@ -1012,6 +1013,31 @@ $("#play").onclick = async () => {
     await new Promise((r) => setTimeout(r, Math.max(0, PLAY_STEP_MS - (performance.now() - started))));
   }
   if (state.playing === run) stopPlay();
+};
+/* ---------------- AI failure-zone model (experimental add-on) ---------------- */
+function mlText(m) {
+  const s = state.results.summary;
+  const axis = s.axis && s.axis.unit ? ` ${s.axis.unit}` : (s.kind === "general" ? "" : " mm");
+  const first = m.first_photo_with_zone === null ? "no failure zone found in any photo"
+    : `first finds a failure zone in photo ${m.first_photo_with_zone}${m.first_zone_axis === null ? "" : ` (at ${fmt(m.first_zone_axis, 1)}${axis})`}; ${m.zones_last_photo.length} zone(s) in the last photo`;
+  return `🤖 AI failure-zone model (experimental): ${first}. Show it on the photo with “AI failure-zone probability”. ${m.note}`;
+}
+async function renderMl(path) {
+  const m = await api().ml_zones(path);
+  $("#res-ml").classList.toggle("hidden", !m.ok);
+  if (m.ok) $("#res-ml").textContent = mlText(m);
+}
+$("#btn-ml").onclick = async () => {
+  const b = $("#btn-ml"); b.disabled = true; b.textContent = "Running AI model…";
+  try {
+    const r = await api().run_ml_zones(state.projectPath);
+    if (!r.ok) return toast(r.error);
+    state.frameCache = {};
+    await fillQuantities(); await renderMl(state.projectPath);
+    state.quantity = "zone_probability"; $("#overlay-quantity").value = state.quantity;
+    $("#overlay-quantity").dispatchEvent(new Event("change"));
+    toast("AI model done: the photo now shows its failure-zone probability.");
+  } finally { b.disabled = false; b.textContent = "AI failure zones"; }
 };
 $("#btn-report").onclick = async () => { const r = await api().open_report(state.projectPath); if (!r.ok) toast(r.error); };
 $("#btn-finder").onclick = () => api().reveal(state.projectPath);

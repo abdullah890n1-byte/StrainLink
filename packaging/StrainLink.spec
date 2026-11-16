@@ -10,6 +10,7 @@ from strainlink import __version__
 
 STATIC = os.path.join(ROOT, "src", "strainlink", "app", "static")
 ICONS = os.path.join(ROOT, "build", "icons")
+MODEL = os.path.join(ROOT, "src", "strainlink", "ml", "zone_model.joblib")
 BUNDLE_ID = "com.strainlink.app"
 # Why macOS should let StrainLink read these folders (it asks the user once).
 FOLDER_REASON = "StrainLink reads the photos, videos and logger files of your tests from this folder, and saves its results next to them."
@@ -17,8 +18,12 @@ FOLDER_REASON = "StrainLink reads the photos, videos and logger files of your te
 analysis = Analysis(
     [os.path.join(SPECPATH, "launch.py")],
     pathex=[os.path.join(ROOT, "src")],
-    datas=[(STATIC, os.path.join("strainlink", "app", "static"))],
-    hiddenimports=[],
+    datas=[(STATIC, os.path.join("strainlink", "app", "static"))]
+    # The trained AI failure-zone model (made by scripts/ml_train.py; kept in the repository).
+    + [(MODEL, os.path.join("strainlink", "ml"))] * os.path.exists(MODEL),
+    # The model is unpickled at run time, so PyInstaller cannot see which scikit-learn parts it uses.
+    hiddenimports=["sklearn.ensemble._hist_gradient_boosting.gradient_boosting", "sklearn.neural_network",
+                   "sklearn.pipeline", "sklearn.preprocessing"],
     # Not used by the app: leaving them out keeps the download smaller. The charts need only
     # plotly's JavaScript file (in the static folder), not the plotly Python package.
     excludes=["tkinter", "pytest", "IPython", "plotly", "PyQt5", "PyQt6", "PySide2", "PySide6", "notebook"],

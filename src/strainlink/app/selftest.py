@@ -52,6 +52,10 @@ def run() -> int:
             kinds = [zone["mode"] for zone in summary["zones"]]
             if "opening" not in kinds:
                 raise RuntimeError(f"the crack was not found (zones: {kinds})")
+            # The AI add-on: its model file and the scikit-learn parts it needs must be in the bundle.
+            from ..ml.apply import run_on_analysis
+            ai = run_on_analysis(project)
+            say(f"AI failure-zone model ran: {'zone found in photo ' + str(ai['first_photo_with_zone']) if ai['first_photo_with_zone'] else 'no zone found'}")
         # The interface: its files must be where the app looks for them, and the window toolkit
         # must load (it is imported, not opened).
         from .main import STATIC, _ensure_chart_library
