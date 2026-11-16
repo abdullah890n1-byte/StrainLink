@@ -36,7 +36,19 @@ def main(argv: list[str] | None = None) -> int:
     exp.add_argument("--format", choices=["csv", "mat"], default="csv")
     chk = sub.add_parser("check", help="compare an analysed synthetic test with its known answers")
     chk.add_argument("project")
+    ml = sub.add_parser("ml-zones", help="run the experimental AI failure-zone model on an analysed project")
+    ml.add_argument("project")
     args = parser.parse_args(argv)
+
+    if args.command == "ml-zones":
+        from .ml.apply import run_on_analysis
+        result = run_on_analysis(args.project)
+        first = result["first_photo_with_zone"]
+        print(f"AI failure-zone model ({result['model']}): "
+              + (f"first zone in photo {first}; {len(result['zones_last_photo'])} zone(s) in the last photo." if first
+                 else "no zone found."))
+        print(result["note"])
+        return 0
 
     if args.command == "app":
         from .app.main import main as app_main

@@ -50,7 +50,10 @@ QUANTITIES = {q.key: q for q in [
     Quantity("ux", "Displacement u (x)", "mm", True),
     Quantity("uz", "Displacement w (z, up)", "mm", True),
     Quantity("umag", "Displacement magnitude", "mm", False),
+    # Only for analyses on which the AI failure-zone model was run (results/ml_zones.npz).
+    Quantity("zone_probability", "AI failure-zone probability (experimental)", "", False),
 ]}
+OPTIONAL = {"zone_probability"}
 # Measures computed from the gradients (strain.measures uses y for the second axis; here it is z).
 _RENAME = {"eyy_eng": "ezz_eng", "almansi_yy": "almansi_zz", "almansi_xy": "almansi_xz"}
 
@@ -61,6 +64,10 @@ class FieldStore:
     def __init__(self, results_dir: str | Path):
         with np.load(Path(results_dir) / "fields.npz") as npz:
             self.data = {name: npz[name] for name in npz.files}
+        ml = Path(results_dir) / "ml_zones.npz"
+        if ml.exists():
+            with np.load(ml) as npz:
+                self.data["zone_probability"] = npz["zone_probability"]
         self.x, self.z = self.data["x_mm"], self.data["z_mm"]
         self.spacing = float(abs(self.x[0, 1] - self.x[0, 0]))
         self.frames = len(self.data["ux"])
@@ -71,6 +78,8 @@ class FieldStore:
             raise KeyError(f"unknown quantity {key}")
         if key in self.data and key not in ("x_mm", "z_mm"):
             return self.data[key][k]
+        if key in OPTIONAL:                      # not available for this analysis
+            return np.full(self.x.shape, np.nan)
         if (key, k) in self._cache:
             return self._cache[(key, k)]
         ux, uz = self.data["ux"][k], self.data["uz"][k]
@@ -91,6 +100,9 @@ class FieldStore:
         self._cache[(key, k)] = out
         return out
 
+    def available(self, key: str) -> bool:
+        return key not in OPTIONAL or key in self.data
+
     def uncertainty(self, key: str, k: int, compressed: bool = False) -> np.ndarray:
         """95% uncertainty of a quantity at every point of photo k, in the quantity's own unit.
 
@@ -102,7 +114,9 @@ class FieldStore:
         name = ("u95", key, k, compressed)
         if name in self._cache:
             return self._cache[name]
-        if key in ("ux", "uz"):
+        if key in OPTIONAL:                      # a model's output, not a measurement: no measurement accuracy
+            out = np.full(self.x.shape, np.nan)
+        elif key in ("ux", "uz"):
             along = self.get("exx" if key == "ux" else "ezz", k)
             out = accuracy.displacement_uncertainty(along, self.get(key, k), self.spacing, STRAIN_WINDOW, compressed)
         elif key == "umag":

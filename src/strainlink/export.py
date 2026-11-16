@@ -25,7 +25,7 @@ def export(results_dir: str | Path, fmt: str = "csv") -> Path:
     store = FieldStore(results_dir)
     out = results_dir / "export"
     out.mkdir(exist_ok=True)
-    keys = list(QUANTITIES)
+    keys = [k for k in QUANTITIES if store.available(k)]
     axis = store.data.get("push_mm", np.arange(store.frames, dtype=float))
     try:
         compressed = bool(json.loads((results_dir / "summary.json").read_text(encoding="utf-8")).get("accuracy", {}).get("compressed_images"))
@@ -52,7 +52,7 @@ def export(results_dir: str | Path, fmt: str = "csv") -> Path:
     (out / "README.txt").write_text(
         "StrainLink field export: one CSV per photo; x_mm, z_mm are positions in the first photo (z up).\n"
         "Axis value of each photo (wall push, displacement or time): " + json.dumps(np.round(axis, 6).tolist()) + "\n\n"
-        + "\n".join(f"{k}: {q.label}" + (f" ({q.unit})" if q.unit else "") for k, q in QUANTITIES.items()) + "\n\n"
+        + "\n".join(f"{k}: {QUANTITIES[k].label}" + (f" ({QUANTITIES[k].unit})" if QUANTITIES[k].unit else "") for k in keys) + "\n\n"
         + "<name>_accuracy95: the 95% accuracy of that quantity at each point (the true value is expected within\n"
           "± this, 95 times in 100), in the quantity's own unit; given for " + ", ".join(WITH_ACCURACY) + ".\n", encoding="utf-8")
     return out

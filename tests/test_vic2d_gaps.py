@@ -47,14 +47,15 @@ def test_lens_fitted_from_a_checkerboard_and_corrects_positions():
 
 def test_export_writes_every_quantity(tmp_path):
     from strainlink.export import export
-    from strainlink.fields import QUANTITIES
+    from strainlink.fields import OPTIONAL, QUANTITIES
     x, z = np.meshgrid(np.arange(10.0), np.arange(8.0)[::-1])
     ux = np.stack([0 * x, 0.01 * x]); uz = np.stack([0 * z, -0.003 * z])
     np.savez_compressed(tmp_path / "fields.npz", x_mm=x, z_mm=z, ux=ux, uz=uz, push_mm=np.array([0.0, 1.0]))
     out = export(tmp_path, "csv")
     import pandas as pd
     table = pd.read_csv(out / "photo_0002.csv")
-    assert set(QUANTITIES) <= set(table.columns)
+    assert set(QUANTITIES) - OPTIONAL <= set(table.columns)
+    assert not OPTIONAL & set(table.columns)            # the AI model was not run on this analysis
     assert table["exx_eng"].median() == pytest.approx(0.01, abs=1e-9)
     from scipy.io import loadmat
     mat = loadmat(export(tmp_path, "mat"))
